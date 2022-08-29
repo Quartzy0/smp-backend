@@ -864,7 +864,7 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
         bufferevent_free(bev);
         printf("Client disconnected (%zu)\n", --client_count);
         if (client_count == 0) { // !!! TEMPORARY AND ONLY FOR TESTING !!!
-            event_base_loopbreak(bufferevent_get_base(bev));
+            event_base_loopexit(bufferevent_get_base(bev), NULL);
         }
     }
 }

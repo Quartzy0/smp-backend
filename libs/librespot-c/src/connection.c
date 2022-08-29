@@ -281,8 +281,8 @@ connection_clear(struct sp_connection *conn) {
     if (!conn)
         return;
 
-    if (conn->response_ev)
-        event_free(conn->response_ev);
+    if (conn->response_bev)
+        bufferevent_free(conn->response_bev);
     if (conn->idle_ev)
         event_free(conn->idle_ev);
     if (conn->timeout_ev)
@@ -290,20 +290,23 @@ connection_clear(struct sp_connection *conn) {
 
     if (conn->handshake_packets)
         evbuffer_free(conn->handshake_packets);
-    if (conn->incoming)
-        evbuffer_free(conn->incoming);
+//    if (conn->incoming)
+//        evbuffer_free(conn->incoming);
 
     free(conn->ap_address);
     free(conn->keys.shared_secret);
 
     memset(conn, 0, sizeof(struct sp_connection));
-    conn->response_fd = -1;
+//    conn->response_fd = -1;
 }
 
 void
 ap_disconnect(struct sp_connection *conn) {
-    if (conn->is_connected)
-        sp_cb.tcp_disconnect(conn->response_fd);
+    if (conn->is_connected){
+//        sp_cb.tcp_disconnect(conn->response_fd);
+        bufferevent_free(conn->response_bev);
+        conn->response_bev = NULL;
+    }
 
     connection_clear(conn);
 }
@@ -319,7 +322,7 @@ connection_idle_cb(int fd, short what, void *arg) {
 
 static int
 connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn_callbacks *cb, void *response_cb_arg) {
-    int response_fd;
+//    int response_fd;
     int ret;
 
     if (!conn->ap_address || !conn->ap_port) {
@@ -328,29 +331,40 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
             RETURN_ERROR(ret, sp_errmsg);
     }
 
-#ifndef DEBUG_MOCK
+/*#ifndef DEBUG_MOCK
     response_fd = sp_cb.tcp_connect(conn->ap_address, conn->ap_port);
     if (response_fd < 0)
         RETURN_ERROR(SP_ERR_NOCONNECTION, "Could not connect to access point");
 #else
     pipe(debug_mock_pipe);
     response_fd = debug_mock_pipe[0];
-#endif
+#endif*/
 
-    conn->response_fd = response_fd;
-    conn->response_ev = event_new(cb->evbase, response_fd, EV_READ | EV_PERSIST, cb->response_cb, response_cb_arg);
+//    conn->response_fd = response_fd;
+//    conn->response_ev = event_new(cb->evbase, response_fd, EV_READ | EV_PERSIST, cb->response_cb, response_cb_arg);
+    conn->response_bev = bufferevent_socket_new(cb->evbase, -1, BEV_OPT_CLOSE_ON_FREE);
+
+    bufferevent_setcb(conn->response_bev, cb->response_cb, NULL, NULL, response_cb_arg);
+    bufferevent_enable(conn->response_bev, EV_READ|EV_WRITE);
+    bufferevent_setwatermark(conn->response_bev, EV_READ, 20, 0);
+
+    if (bufferevent_socket_connect_hostname(conn->response_bev, NULL, AF_UNSPEC, conn->ap_address, conn->ap_port)) {
+        /* Error starting connection */
+        bufferevent_free(conn->response_bev);
+        return -1;
+    }
     conn->timeout_ev = evtimer_new(cb->evbase, cb->timeout_cb, conn);
 
     conn->idle_ev = evtimer_new(cb->evbase, connection_idle_cb, conn);
 
     conn->handshake_packets = evbuffer_new();
-    conn->incoming = evbuffer_new();
+//    conn->incoming = evbuffer_new();
 
     crypto_keys_set(&conn->keys);
     conn->encrypt.logmsg = sp_cb.logmsg;
     conn->decrypt.logmsg = sp_cb.logmsg;
 
-    event_add(conn->response_ev, NULL);
+    //event_add(conn->response_ev, NULL);
 
     conn->is_connected = true;
 
@@ -874,7 +888,7 @@ msg_read_one(uint8_t **out, size_t *out_len, uint8_t *in, size_t in_len, struct 
     // At this point we have a complete, decrypted message.
     *out = malloc(msg_len);
     *out_len = msg_len;
-    evbuffer_remove(conn->incoming, *out, msg_len);
+    evbuffer_remove(bufferevent_get_input(conn->response_bev), *out, msg_len);
 
     return SP_OK_DONE;
 
@@ -885,14 +899,15 @@ msg_read_one(uint8_t **out, size_t *out_len, uint8_t *in, size_t in_len, struct 
 enum sp_error
 response_read(struct sp_session *session) {
     struct sp_connection *conn = &session->conn;
+    struct evbuffer *data = bufferevent_get_input(conn->response_bev);
     uint8_t *in;
     size_t in_len;
     uint8_t *msg;
     size_t msg_len;
     int ret;
 
-    in_len = evbuffer_get_length(conn->incoming);
-    in = evbuffer_pullup(conn->incoming, -1);
+    in_len = evbuffer_get_length(data);
+    in = evbuffer_pullup(data, -1);
 
     ret = msg_read_one(&msg, &msg_len, in, in_len, conn);
     if (ret != SP_OK_DONE)
@@ -1363,8 +1378,9 @@ msg_send(struct sp_message *msg, struct sp_connection *conn) {
         RETURN_ERROR(SP_ERR_INVALID, "Error constructing packet to Spotify");
 
 #ifndef DEBUG_MOCK
-    ret = send(conn->response_fd, pkt, pkt_len, 0);
-    if (ret != pkt_len)
+    ret = bufferevent_write(conn->response_bev, pkt, pkt_len);
+//    ret = send(conn->response_fd, pkt, pkt_len, 0);
+    if (ret != 0)
         RETURN_ERROR(SP_ERR_NOCONNECTION, "Error sending packet to Spotify");
 
 //  sp_cb.logmsg("Sent pkt type %d (cmd=0x%02x) with size %zu (fd=%d)\n", msg->type, msg->cmd, pkt_len, conn->response_fd);

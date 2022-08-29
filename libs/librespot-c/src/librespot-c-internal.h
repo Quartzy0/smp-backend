@@ -44,7 +44,7 @@
 #define SP_AP_DISCONNECT_SECS 60
 
 // Max wait for AP to respond
-#define SP_AP_TIMEOUT_SECS 10
+#define SP_AP_TIMEOUT_SECS 30
 
 // After a disconnect we try to reconnect, but if we are disconnected yet again
 // we get the hint and won't try reconnecting again until after this cooldown
@@ -168,7 +168,7 @@ struct sp_cmdargs {
 struct sp_conn_callbacks {
     struct event_base *evbase;
 
-    event_callback_fn response_cb;
+    bufferevent_data_cb response_cb;
     event_callback_fn timeout_cb;
 };
 
@@ -197,16 +197,16 @@ struct sp_connection {
     unsigned short ap_port;
 
     // Where we receive data from Spotify
-    int response_fd;
-    //struct bufferevent *response_bev;
-    struct event *response_ev;
+    //int response_fd;
+    struct bufferevent *response_bev;
+    //struct event *response_ev;
 
     // Connection timers
     struct event *idle_ev;
     struct event *timeout_ev;
 
     // Holds incoming data
-    struct evbuffer *incoming;
+    //struct evbuffer *incoming;
 
     // Buffer holding client hello and ap response, since they are needed for
     // MAC calculation
@@ -313,6 +313,8 @@ struct sp_session {
     enum sp_bitrates bitrate_preferred;
 
     struct sp_channel channels[8];
+
+    struct command *current_cmd;
 
     // Points to the channel that is streaming, and via this information about
     // the current track is also available

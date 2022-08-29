@@ -185,7 +185,7 @@ session_return(struct sp_session *session, enum sp_error err) {
     struct sp_channel *channel = session->now_streaming_channel;
     int ret;
 
-    ret = commands_exec_returnvalue(sp_cmdbase);
+    ret = commands_exec_returnvalue(session);
     if (ret == 0) // Here we are async, i.e. no pending command
     {
         // track_write() completed, close the write end which means reader will
@@ -195,7 +195,7 @@ session_return(struct sp_session *session, enum sp_error err) {
         return;
     }
 
-    commands_exec_end(sp_cmdbase, err);
+    commands_exec_end(sp_cmdbase, err, session);
 }
 
 #define ERROR_ENTRY(x) [x+9]=#x
@@ -336,13 +336,13 @@ timeout_cb(int fd, short what, void *arg) {
 }
 
 static void
-response_cb(int fd, short what, void *arg) {
+response_cb(struct bufferevent *bev, void *arg) {
     struct sp_session *session = arg;
     struct sp_connection *conn = &session->conn;
     struct sp_channel *channel = session->now_streaming_channel;
     int ret;
 
-    if (what == EV_READ) {
+    /*if (what == EV_READ) {
         ret = evbuffer_read(conn->incoming, fd, -1);
 #ifdef DEBUG_DISCONNECT
         debug_disconnect_counter++;
@@ -359,7 +359,7 @@ response_cb(int fd, short what, void *arg) {
             RETURN_ERROR(SP_ERR_NOCONNECTION, "Connection to Spotify returned an error");
 
 //      sp_cb.logmsg("Received data len %d\n", ret);
-    }
+    }*/
 
     ret = response_read(session);
     switch (ret) {
@@ -377,15 +377,15 @@ response_cb(int fd, short what, void *arg) {
             event_add(channel->audio_write_ev, NULL);
             break;
         case SP_OK_DONE: // Got the response we expected, but possibly more to process
-            if (evbuffer_get_length(conn->incoming) > 0)
-                event_active(conn->response_ev, 0, 0);
+            if (evbuffer_get_length(bufferevent_get_input(bev)) > 0)
+                response_cb(bev, arg);
 
             event_del(conn->timeout_ev);
             event_active(session->continue_ev, 0, 0);
             break;
         case SP_OK_OTHER: // Not the response we were waiting for, check for other
-            if (evbuffer_get_length(conn->incoming) > 0)
-                event_active(conn->response_ev, 0, 0);
+            if (evbuffer_get_length(bufferevent_get_input(bev)) > 0)
+                response_cb(bev, arg);
             break;
         default:
             event_del(conn->timeout_ev);
@@ -468,11 +468,12 @@ request_make(enum sp_msg_type type, struct sp_session *session) {
 
 // This command is async
 static enum command_state
-track_write(void *arg, int *retval) {
+track_write(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     struct sp_channel *channel;
     int ret;
+    session->current_cmd = NULL;
 
     *retval = 0;
 
@@ -498,11 +499,12 @@ track_write(void *arg, int *retval) {
 }
 
 static enum command_state
-track_pause(void *arg, int *retval) {
+track_pause(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     struct sp_channel *channel;
     int ret;
+    session->current_cmd = cmd;
 
     channel = session->now_streaming_channel;
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
@@ -528,11 +530,12 @@ track_pause(void *arg, int *retval) {
 }
 
 static enum command_state
-track_seek(void *arg, int *retval) {
+track_seek(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     struct sp_channel *channel;
     int ret;
+    session->current_cmd = cmd;
 
     channel = session->now_streaming_channel;
     if (!channel)
@@ -557,7 +560,7 @@ track_seek(void *arg, int *retval) {
 }
 
 static enum command_state
-track_close(void *arg, int *retval) {
+track_close(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     int ret;
@@ -570,12 +573,13 @@ track_close(void *arg, int *retval) {
 }
 
 static enum command_state
-media_open(void *arg, int *retval) {
+media_open(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     struct sp_channel *channel = NULL;
     enum sp_msg_type type;
     int ret;
+    session->current_cmd = cmd;
 
     ret = session_check(session);
     if (ret < 0)
@@ -621,7 +625,7 @@ media_open(void *arg, int *retval) {
 }
 
 static enum command_state
-media_open_bh(void *arg, int *retval) {
+media_open_bh(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
 
     if (*retval == SP_OK_DONE)
@@ -631,13 +635,14 @@ media_open_bh(void *arg, int *retval) {
 }
 
 static enum command_state
-login(void *arg, int *retval) {
+login(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     int ret;
 
     ret = session_new(cmdargs->session_out, cmdargs, continue_cb);
     if (ret < 0)
         goto error;
+    (*cmdargs->session_out)->current_cmd = cmd;
 
     ret = request_make(MSG_TYPE_CLIENT_HELLO, *cmdargs->session_out);
     if (ret < 0)
@@ -654,7 +659,7 @@ login(void *arg, int *retval) {
 }
 
 static enum command_state
-login_bh(void *arg, int *retval) {
+login_bh(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
 
     if (*retval == SP_OK_DONE)
@@ -666,10 +671,11 @@ login_bh(void *arg, int *retval) {
 }
 
 static enum command_state
-logout(void *arg, int *retval) {
+logout(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     int ret;
+    session->current_cmd = cmd;
 
     ret = session_check(session);
     if (ret < 0)
@@ -683,10 +689,11 @@ logout(void *arg, int *retval) {
 }
 
 static enum command_state
-bitrate_set(void *arg, int *retval) {
+bitrate_set(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     int ret;
+    session->current_cmd = cmd;
 
     if (cmdargs->bitrate == SP_BITRATE_ANY)
         cmdargs->bitrate = SP_BITRATE_DEFAULT;
@@ -703,11 +710,12 @@ bitrate_set(void *arg, int *retval) {
 }
 
 static enum command_state
-credentials_get(void *arg, int *retval) {
+credentials_get(void *arg, int *retval, struct command *cmd) {
     struct sp_cmdargs *cmdargs = arg;
     struct sp_session *session = cmdargs->session;
     struct sp_credentials *credentials = cmdargs->credentials;
     int ret;
+    session->current_cmd = cmd;
 
     ret = session_check(session);
     if (ret < 0)

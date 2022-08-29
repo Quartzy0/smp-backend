@@ -25,7 +25,10 @@ enum command_state {
  * @return    COMMAND_END if there are no pending events (function execution is 
  *            complete) or COMMAND_PENDING if there are pending events
  */
-typedef enum command_state (*command_function)(void *arg, int *ret);
+struct command;
+struct sp_session;
+
+typedef enum command_state (*command_function)(void *arg, int *ret, struct command *cmd);
 
 typedef void (*command_exit_cb)(void);
 
@@ -40,10 +43,10 @@ int
 commands_base_free(struct commands_base *cmdbase);
 
 int
-commands_exec_returnvalue(struct commands_base *cmdbase);
+commands_exec_returnvalue(struct sp_session *session);
 
 void
-commands_exec_end(struct commands_base *cmdbase, int retvalue);
+commands_exec_end(struct commands_base *cmdbase, int retvalue, struct sp_session *session);
 
 int
 commands_exec_sync(struct commands_base *cmdbase, command_function func, command_function func_bh, void *arg,

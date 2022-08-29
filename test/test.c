@@ -97,7 +97,7 @@ int main(int argc, char **argv) {
 
     if (argc != 2) return -1;
 
-    timeout.tv_sec = 10;
+    timeout.tv_sec = 30;
     timeout.tv_usec = 0;
 
     srand(clock());

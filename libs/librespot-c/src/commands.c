@@ -72,7 +72,7 @@ command_cb_async(struct commands_base *cmdbase, struct command *cmd) {
     enum command_state cmdstate;
 
     // Command is executed asynchronously
-    cmdstate = cmd->func(cmd->arg, &cmd->ret);
+    cmdstate = cmd->func(cmd->arg, &cmd->ret, cmd);
 
     // Only free arg if there are no pending events (used in worker.c)
     if (cmdstate != COMMAND_PENDING && cmd->arg)
@@ -93,15 +93,15 @@ command_cb_sync(struct commands_base *cmdbase, struct command *cmd) {
 //  pthread_mutex_lock(&cmd->lck);
 //  pthread_mutex_lock(&cmdbase->mutex);
 
-    cmdstate = cmd->func(cmd->arg, &cmd->ret);
+    cmdstate = cmd->func(cmd->arg, &cmd->ret, cmd);
     if (cmdstate == COMMAND_PENDING) {
         // Command execution is waiting for pending events before returning to the caller
-        cmdbase->current_cmd = cmd;
+//        cmdbase->current_cmd = cmd;
         cmd->pending = cmd->ret;
     } else {
         // Command execution finished, execute the bottom half function
         if (cmd->ret == 0 && cmd->func_bh)
-            cmd->func_bh(cmd->arg, &cmd->ret);
+            cmd->func_bh(cmd->arg, &cmd->ret, cmd);
         if (cmd->data.cb) {
             cmd->data.retval = cmd->ret;
             write(cmdbase->fd, &cmd->data, sizeof(cmd->data));
@@ -109,8 +109,6 @@ command_cb_sync(struct commands_base *cmdbase, struct command *cmd) {
         free(cmd->arg);
         free(cmd);
 //      pthread_mutex_unlock(&cmdbase->mutex);
-
-        event_add(cmdbase->command_event, NULL);
 
         // Signal the calling thread that the command execution finished
 //      pthread_cond_signal(&cmd->cond);
@@ -120,6 +118,7 @@ command_cb_sync(struct commands_base *cmdbase, struct command *cmd) {
         // Note if cmd->func was cmdloop_exit then cmdbase may be invalid now,
         // because commands_base_destroy() may have freed it
     }
+    event_add(cmdbase->command_event, NULL);
 }
 
 /*
@@ -249,11 +248,11 @@ commands_base_new(struct event_base *evbase, command_exit_cb exit_cb, int fd) {
  * @return The current return value
  */
 int
-commands_exec_returnvalue(struct commands_base *cmdbase) {
-    if (cmdbase->current_cmd == NULL)
+commands_exec_returnvalue(struct sp_session *session) {
+    if (session == NULL || session->current_cmd == NULL)
         return 0;
 
-    return cmdbase->current_cmd->ret;
+    return session->current_cmd->ret;
 }
 
 /*
@@ -268,9 +267,9 @@ commands_exec_returnvalue(struct commands_base *cmdbase) {
  * @param retvalue The return value for the calling thread
  */
 void
-commands_exec_end(struct commands_base *cmdbase, int retvalue) {
-    struct command *current_cmd = cmdbase->current_cmd;
-
+commands_exec_end(struct commands_base *cmdbase, int retvalue, struct sp_session *session) {
+    if (!session) return;
+    struct command *current_cmd = session->current_cmd;
     if (!current_cmd)
         return;
 
@@ -284,19 +283,20 @@ commands_exec_end(struct commands_base *cmdbase, int retvalue) {
 
     // All pending events have finished, execute the bottom half and signal the caller that the command execution finished
     if (current_cmd->func_bh)
-        current_cmd->func_bh(current_cmd->arg, &current_cmd->ret);
+        current_cmd->func_bh(current_cmd->arg, &current_cmd->ret, current_cmd);
     if (current_cmd->data.cb) {
         current_cmd->data.retval = current_cmd->ret;
         write(cmdbase->fd, &current_cmd->data, sizeof(current_cmd->data));
     }
     free(current_cmd->arg);
-    free(cmdbase->current_cmd);
+    free(current_cmd);
+    session->current_cmd = NULL;
 
-    cmdbase->current_cmd = NULL;
+//    cmdbase->current_cmd = NULL;
 //  pthread_mutex_unlock(&cmdbase->mutex);
 
     /* Process commands again */
-    event_add(cmdbase->command_event, NULL);
+//    event_add(cmdbase->command_event, NULL);
 
 //  pthread_cond_signal(&current_cmd->cond);
 //  pthread_mutex_unlock(&current_cmd->lck);
@@ -401,7 +401,7 @@ commands_exec_async(struct commands_base *cmdbase, command_function func, void *
  * @param retval Always set to COMMAND_END
  */
 static enum command_state
-cmdloop_exit(void *arg, int *retval) {
+cmdloop_exit(void *arg, int *retval, struct command *cmd) {
     struct commands_base *cmdbase = arg;
     *retval = 0;
 
