@@ -20,6 +20,7 @@
 #include "openssl_hostname_validation.h"
 #include "cmd.h"
 #include "vec.h"
+#include <ctype.h>
 
 
 #define PORT 5394
@@ -115,6 +116,18 @@ struct request_state {
     FILE *fp;
     int write_job_index;
 };
+
+//5soMJpcVhSrGrB4prvPL6P_
+
+bool
+is_valid_id(const char *id){
+    if (!id) return false;
+    if (memchr(id, '\0', 22)) return false; // If string is shorter than the minimum length
+    for (int i = 0; i < 22; ++i) {
+        if (!isalnum(id[i])) return false;
+    }
+    return true;
+}
 
 static void
 audio_read_cb(int fd, short what, void *arg);
@@ -667,8 +680,12 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
     switch (data) {
         case MUSIC_DATA: {
             char id[23];
-            evbuffer_remove(input, id, sizeof(id) - 1);
+            int read = evbuffer_remove(input, id, sizeof(id) - 1);
             id[22] = 0;
+            if (read != sizeof(id) - 1 || !is_valid_id(id)){
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                return;
+            }
 
             char path[35] = "music_cache/";
             memcpy(&path[12], id, sizeof(id));
@@ -757,8 +774,12 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
         }
         case MUSIC_INFO: {
             char id[34] = "/v1/tracks/";
-            evbuffer_remove(input, &id[11], 22);
+            int read = evbuffer_remove(input, &id[11], 22);
             id[33] = 0;
+            if (read != 22 || !is_valid_id(&id[11])){
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                return;
+            }
 
             char path[34] = "music_info/";
             memcpy(&path[11], &id[11], 23);
@@ -787,8 +808,12 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
         }
         case PLAYLIST_INFO: {
             char id[37] = "/v1/playlists/";
-            evbuffer_remove(input, &id[14], 22);
+            int read = evbuffer_remove(input, &id[14], 22);
             id[36] = 0;
+            if (read != 22 || !is_valid_id(&id[14])){
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                return;
+            }
 
             char path[37] = "playlist_info/";
             memcpy(&path[14], &id[14], 23);
@@ -817,8 +842,12 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
         }
         case ALBUM_INFO: {
             char id[34] = "/v1/albums/";
-            evbuffer_remove(input, &id[11], 22);
+            int read = evbuffer_remove(input, &id[11], 22);
             id[33] = 0;
+            if (read != 22 || !is_valid_id(&id[11])){
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                return;
+            }
 
             char path[34] = "album_info/";
             memcpy(&path[11], &id[11], 23);
