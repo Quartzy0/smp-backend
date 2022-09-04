@@ -40,8 +40,9 @@ vec_add(struct vec *vec, void *el) {
     CHECK_ERROR(pthread_mutex_lock(&vec->mutex));
     if (vec->size <= vec->len + 1) {
         void **realloc_tmp = realloc(vec->el, vec->size + VEC_SIZE_STEP);
-        CHECK_ERROR(realloc_tmp);
+        CHECK_ERROR(!realloc_tmp);
         vec->el = realloc_tmp;
+        vec->size += VEC_SIZE_STEP;
     }
     vec->el[vec->len++] = el;
     CHECK_ERROR(pthread_mutex_unlock(&vec->mutex));

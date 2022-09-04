@@ -368,10 +368,6 @@ response_cb(struct bufferevent *bev, void *arg) {
         case SP_OK_DATA:
             if (channel->state == SP_CHANNEL_STATE_PLAYING && !channel->file.end_of_file)
                 session->msg_type_next = MSG_TYPE_CHUNK_REQUEST;
-            if (channel->progress_cb)
-                channel->progress_cb(channel->audio_fd[0], channel->cb_arg,
-                                     4 * channel->file.received_words - SP_OGG_HEADER_LEN,
-                                     4 * channel->file.len_words - SP_OGG_HEADER_LEN);
 
             event_del(conn->timeout_ev);
             event_add(channel->audio_write_ev, NULL);
@@ -486,9 +482,6 @@ track_write(void *arg, int *retval, struct command *cmd) {
     ret = request_make(MSG_TYPE_CHUNK_REQUEST, session);
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
-
-    channel->progress_cb = cmdargs->progress_cb;
-    channel->cb_arg = cmdargs->cb_arg;
 
     return COMMAND_END;
 

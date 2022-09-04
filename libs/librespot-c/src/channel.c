@@ -1,4 +1,3 @@
-#include <errno.h>
 #include <fcntl.h>
 
 #include "librespot-c-internal.h"
@@ -27,25 +26,6 @@ Here is my current understanding of the channel concept:
 5. For Ogg, the first 167 bytes of audio is a special Spotify header.
 6. The channel can presumably be reset with CmdChannelAbort (?)
 */
-
-static int
-path_to_media_id_and_type(struct sp_file *file) {
-    char *ptr;
-
-    file->media_type = SP_MEDIA_UNKNOWN;
-    if (strstr(file->path, ":track:"))
-        file->media_type = SP_MEDIA_TRACK;
-    else if (strstr(file->path, ":episode:"))
-        file->media_type = SP_MEDIA_EPISODE;
-    else
-        return -1;
-
-    ptr = strrchr(file->path, ':');
-    if (!ptr || strlen(ptr + 1) != 22)
-        return -1;
-
-    return crypto_base62_to_bin(file->media_id, sizeof(file->media_id), ptr + 1);
-}
 
 struct sp_channel *
 channel_get(uint32_t channel_id, struct sp_session *session) {
@@ -77,8 +57,6 @@ channel_free(struct sp_channel *channel) {
 
     crypto_aes_free(&channel->file.decrypt);
 
-    free(channel->file.path);
-
     memset(channel, 0, sizeof(struct sp_channel));
 
     channel->audio_fd[0] = -1;
@@ -107,9 +85,8 @@ channel_new(struct sp_channel **new_channel, struct sp_session *session, const c
     channel->id = i;
     channel->state = SP_CHANNEL_STATE_OPENED;
 
-    channel->file.path = strdup(path);
     channel->file.media_type = media_type;
-    crypto_base62_to_bin(channel->file.media_id, sizeof(channel->file.media_id), channel->file.path);
+    crypto_base62_to_bin(channel->file.media_id, sizeof(channel->file.media_id), path);
 
     // Set up the audio I/O
     ret = pipe(channel->audio_fd);

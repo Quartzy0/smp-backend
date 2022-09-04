@@ -101,9 +101,9 @@ int main(int argc, char **argv) {
     timeout.tv_usec = 0;
 
     srand(clock());
-    char *fname = calloc(17, sizeof(*fname));
+    char *fname = calloc(16 + strlen(argv[1]), sizeof(*fname));
     int n = (int) ((rand() / (float) RAND_MAX) * 9999.f);
-    snprintf(fname, 17, "testfile%d.ogg", n);
+    snprintf(fname, 16 + strlen(argv[1]), "test-%s-%d.ogg", argv[1], n);
 
     userp.fp = fopen(fname, "w");
     userp.file_len = 0;

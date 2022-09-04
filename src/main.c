@@ -78,6 +78,7 @@ struct session_pool {
         char id[22];
         char *path;
         size_t progress;
+        size_t file_len;
     } elements[SESSION_POOL_MAX];
 };
 
@@ -116,8 +117,6 @@ struct request_state {
     FILE *fp;
     int write_job_index;
 };
-
-//5soMJpcVhSrGrB4prvPL6P_
 
 bool
 is_valid_id(const char *id){
@@ -547,24 +546,25 @@ spotify_file_open_cb(int fd, void *userp) {
         for (int i = 0; i < element->bev_vec.len; ++i) {
             write_error_spotify(element->bev_vec.el[i]);
         }
+        fclose(element->cache_fp);
+        remove(element->path);
         return;
     }
 
     printf("Opened spotify track (%d)\n", fd);
 
-    element->cache_fp = fopen(element->path, "a");
     if (element->progress) {
         librespotc_seek(element->session, element->progress, finish_seek_cb, userp);
         return;
     }
-    size_t file_len = librespotc_get_filelen(element->session);
+    element->file_len = librespotc_get_filelen(element->session);
     enum error_type no_err = ET_NO_ERROR;
     for (int i = 0; i < element->bev_vec.len; ++i) {
         bufferevent_write(element->bev_vec.el[i], &no_err, 1);
-        bufferevent_write(element->bev_vec.el[i], &file_len, sizeof(file_len));
+        bufferevent_write(element->bev_vec.el[i], &element->file_len, sizeof(element->file_len));
     }
     fwrite(&no_err, 1, 1, element->cache_fp);
-    fwrite(&file_len, sizeof(file_len), 1, element->cache_fp);
+    fwrite(&element->file_len, sizeof(element->file_len), 1, element->cache_fp);
     fflush(element->cache_fp);
     finish_seek_cb(0, userp);
 }
@@ -575,6 +575,11 @@ session_cb(int ret, void *userp) {
 
     if (!element->session) {
         fprintf(stderr, "Error creating librespot session: %s\n", librespotc_last_errmsg());
+        for (int i = 0; i < element->bev_vec.len; ++i) {
+            write_error_spotify(element->bev_vec.el[i]);
+        }
+        fclose(element->cache_fp);
+        remove(element->path);
         return;
     }
     printf("Created spotify session (%d)\n", ret);
@@ -599,6 +604,7 @@ activate_session(struct session_pool *pool, size_t progress, char *id, char *pat
                 pool->elements[i].path = strdup(path);
                 vec_init(&pool->elements[i].bev_vec);
                 vec_add(&pool->elements[i].bev_vec, bev);
+                pool->elements[i].cache_fp = fopen(pool->elements[i].path, "a");
                 session_cb(0, &pool->elements[i]);
                 return &pool->elements[i]; // Not active and a valid session
             }
@@ -616,6 +622,7 @@ activate_session(struct session_pool *pool, size_t progress, char *id, char *pat
         pool->elements[uninit].base = bufferevent_get_base(bev);
         pool->elements[uninit].read_ev = NULL;
         pool->elements[uninit].active = true;
+        pool->elements[uninit].cache_fp = fopen(pool->elements[uninit].path, "a");
         memcpy(pool->elements[uninit].id, id, sizeof(pool->elements[uninit].id));
         if (creds->creds.stored_cred_len == 0) {
             librespotc_login_password(creds->creds.username,
@@ -640,6 +647,7 @@ audio_read_cb(int fd, short what, void *arg) {
 
     struct write_job *wj = &element->write_jobs[element->write_job_index++];
     if (element->write_job_index >= MAX_WRITE_JOBS) element->write_job_index = 0;
+    // TODO: Figure out how to handle this asynchronously
     while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
 
     got = read(fd, wj->tmp, MAX_BYTES_PER_READ);
@@ -648,6 +656,9 @@ audio_read_cb(int fd, short what, void *arg) {
         printf("Playback ended (%zu)\n", got);
         event_free(element->read_ev);
         librespotc_close(element->session);
+        for (int i = 0; i < MAX_WRITE_JOBS; ++i) { // Wait for all jobs to finish writing before closing
+            while (aio_error(&element->write_jobs[i].cb) == EINPROGRESS) {}
+        } // TODO: Figure out how to handle this asynchronously
         element->read_ev = NULL;
         vec_free(&element->bev_vec);
         element->active = false;
@@ -693,8 +704,10 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             size_t progress = 0;
             if (!access(path, R_OK)) {
                 FILE *fp = fopen(path, "r");
-                size_t file_len = 0;
-                fread(&file_len, 1, sizeof(file_len), fp);
+                size_t file_len;
+                char tmp_data[1 + sizeof(file_len)];
+                size_t bytes_read = fread(tmp_data, sizeof(tmp_data), 1, fp);
+                file_len = *((size_t*) &tmp_data[1]); // Skip first byte
                 fseek(fp, 0L, SEEK_END);
                 size_t actual_len = ftell(fp);
                 rewind(fp);
@@ -702,7 +715,7 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 int fd = fileno(fp);
                 evbuffer_add_file(output, fd, 0, -1);
 //                fclose(fp); TODO: Figure out how to close properly
-                if (file_len != actual_len - sizeof(file_len)) { // File is fully written
+                if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // File is fully written
                     struct element *element = NULL;
                     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
                         if (!memcmp(session_pool->elements[i].id, id, sizeof(session_pool->elements[i].id))) {
@@ -715,7 +728,7 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                         printf("Sending data for '%s' from cache while reading\n", id);
                         return;
                     } else {
-                        progress = actual_len - sizeof(file_len);
+                        progress = actual_len - sizeof(tmp_data);
                     }
                 } else {
                     printf("Sending data for '%s' from cache\n", id);
@@ -724,52 +737,6 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             }
 
             activate_session(session_pool, progress, id, path, bev);
-            /*if (!element) {
-                bufferevent_write(bev, error_response, sizeof(error_response));
-                fprintf(stderr, "Error occurred when getting new session\n");
-                write_error(bev, ET_FULL, NULL);
-                return;
-            }
-            element->progress = progress;
-            memcpy(element->id, id, sizeof(element->id));
-            int fd = librespotc_open(id, element->session);
-            if (fd < 0) {
-                write_error_spotify(bev);
-                return;
-            }
-
-            element->cache_fp = fopen(path, "a");
-            if (!progress) {
-                struct sp_metadata metadata;
-                int ret = librespotc_metadata_get(&metadata, element->session);
-                if (ret < 0) {
-                    write_error_spotify(bev);
-                    return;
-                }
-                enum error_type no_err = ET_NO_ERROR;
-                bufferevent_write(bev, &no_err, 1);
-                bufferevent_write(bev, &metadata.file_len, sizeof(metadata.file_len));
-                fwrite(&no_err, 1, 1, element->cache_fp);
-                fwrite(&metadata.file_len, sizeof(metadata.file_len), 1, element->cache_fp);
-                fflush(element->cache_fp);
-            } else {
-                librespotc_seek(element->session, progress);
-            }
-
-            element->bevs = calloc(INITIAL_BEVS, sizeof(*element->bevs) * INITIAL_BEVS);
-            element->bevs_size = INITIAL_BEVS;
-            element->bevs_len = 0;
-            add_bev(element, bev);
-            memset(element->write_jobs, 0, sizeof(element->write_jobs));
-            for (int i = 0; i < MAX_WRITE_JOBS; ++i) {
-                element->write_jobs[i].cb.aio_fildes = fileno(element->cache_fp);
-            }
-            element->read_ev = event_new(base, fd, EV_READ | EV_PERSIST, audio_read_cb, element);
-            event_add(element->read_ev, NULL);
-
-            librespotc_write(element->session, NULL, NULL);
-            if (progress) printf("Continuing sending data for '%s' starting at %zu\n", id, progress);
-            else printf("Sending data for '%s'\n", id);*/
             return;
         }
         case MUSIC_INFO: {
@@ -892,9 +859,6 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
         }
         bufferevent_free(bev);
         printf("Client disconnected (%zu)\n", --client_count);
-        if (client_count == 0) { // !!! TEMPORARY AND ONLY FOR TESTING !!!
-            event_base_loopexit(bufferevent_get_base(bev), NULL);
-        }
     }
 }
 

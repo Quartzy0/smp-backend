@@ -44,7 +44,7 @@
 #define SP_AP_DISCONNECT_SECS 60
 
 // Max wait for AP to respond
-#define SP_AP_TIMEOUT_SECS 30
+#define SP_AP_TIMEOUT_SECS 10
 
 // After a disconnect we try to reconnect, but if we are disconnected yet again
 // we get the hint and won't try reconnecting again until after this cooldown
@@ -237,7 +237,6 @@ struct sp_mercury {
 struct sp_file {
     uint8_t id[20];
 
-    char *path; // The Spotify URI, e.g. spotify:episode:3KRjRyqv5ou5SilNMYBR4E
     uint8_t media_id[16]; // Decoded value of the URIs base62
     enum sp_media_type media_type; // track or episode from URI
 
@@ -292,10 +291,6 @@ struct sp_channel {
     // Latest header and body received
     struct sp_channel_header header;
     struct sp_channel_body body;
-
-    // Callbacks made during playback
-    sp_progress_cb progress_cb;
-    void *cb_arg;
 };
 
 // Linked list of sessions
