@@ -29,7 +29,7 @@
 #define MAX_WRITE_JOBS 10
 #define MAX_CREDENTIAL_USES 5
 #define CONNECTION_POOL_MAX 50
-#define URI_MAX_LEN 50
+#define URI_MAX_LEN 200
 #define SPOTIFY_TOKEN_LEN 115
 #define SPOTIFY_TOKEN_HEADER_PREFIX_LEN 7
 #define SPOTIFY_API_HOST "api.spotify.com"
@@ -119,7 +119,7 @@ struct request_state {
 };
 
 bool
-is_valid_id(const char *id){
+is_valid_id(uint8_t *id) {
     if (!id) return false;
     if (memchr(id, '\0', 22)) return false; // If string is shorter than the minimum length
     for (int i = 0; i < 22; ++i) {
@@ -591,7 +591,7 @@ session_cb(int ret, void *userp) {
 }
 
 struct element *
-activate_session(struct session_pool *pool, size_t progress, char *id, char *path,
+activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path,
                  struct bufferevent *bev) {
 
     int uninit = -1;
@@ -686,20 +686,27 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
     struct evbuffer *input = bufferevent_get_input(bev);
     struct evbuffer *output = bufferevent_get_output(bev);
 
-    uint8_t data;
-    evbuffer_remove(input, &data, sizeof(data));
-    switch (data) {
+//    uint8_t data;
+//    evbuffer_remove(input, &data, sizeof(data));
+    size_t in_len = evbuffer_get_length(input);
+    if (in_len < 1) return; // Wait for more data
+    uint8_t *in = evbuffer_pullup(input, -1);
+    switch (in[0]) {
         case MUSIC_DATA: {
-            char id[23];
-            int read = evbuffer_remove(input, id, sizeof(id) - 1);
-            id[22] = 0;
-            if (read != sizeof(id) - 1 || !is_valid_id(id)){
+            if (in_len < 23) return; // Wait for more data
+//            char id[23];
+//            int read = evbuffer_remove(input, id, sizeof(id) - 1);
+//            id[22] = 0;
+            uint8_t *id = &in[1];
+            if (!is_valid_id(id)) {
                 write_error(bev, ET_SPOTIFY, "Invalid track id");
+                evbuffer_drain(input, 23);
                 return;
             }
 
             char path[35] = "music_cache/";
-            memcpy(&path[12], id, sizeof(id));
+            memcpy(&path[12], id, 22);
+            path[34] = 0;
 
             size_t progress = 0;
             if (!access(path, R_OK)) {
@@ -707,7 +714,7 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 size_t file_len;
                 char tmp_data[1 + sizeof(file_len)];
                 size_t bytes_read = fread(tmp_data, sizeof(tmp_data), 1, fp);
-                file_len = *((size_t*) &tmp_data[1]); // Skip first byte
+                file_len = *((size_t *) &tmp_data[1]); // Skip first byte
                 fseek(fp, 0L, SEEK_END);
                 size_t actual_len = ftell(fp);
                 rewind(fp);
@@ -726,27 +733,33 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                     if (element) {
                         vec_add(&element->bev_vec, bev);
                         printf("Sending data for '%s' from cache while reading\n", id);
+                        evbuffer_drain(input, 23);
                         return;
                     } else {
                         progress = actual_len - sizeof(tmp_data);
                     }
                 } else {
                     printf("Sending data for '%s' from cache\n", id);
+                    evbuffer_drain(input, 23);
                     return;
                 }
             }
 
             activate_session(session_pool, progress, id, path, bev);
+            evbuffer_drain(input, 23);
             return;
         }
         case MUSIC_INFO: {
-            char id[34] = "/v1/tracks/";
-            int read = evbuffer_remove(input, &id[11], 22);
-            id[33] = 0;
-            if (read != 22 || !is_valid_id(&id[11])){
+            if (in_len < 23) return; // Wait for more data
+            uint8_t *id = &in[1];
+            if (!is_valid_id(id)) {
                 write_error(bev, ET_SPOTIFY, "Invalid track id");
+                evbuffer_drain(input, 23);
                 return;
             }
+            char uri[34] = "/v1/tracks/";
+            memcpy(&uri[11], id, 22);
+            uri[33] = 0;
 
             char path[34] = "music_info/";
             memcpy(&path[11], &id[11], 23);
@@ -763,24 +776,36 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 if (len - sizeof(read_size) == read_size) {
                     evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
                 } else {
-                    dispatch_request(http_connection_pool, id, bev,
-                                     NULL); // Cache is still being written, make the request without writing to the cache.
-                }                               // Since the API requests are very small in comparison to downloading songs, an
-                return;                         // extra request isn't a big deal.
+                    dispatch_request(http_connection_pool, uri, bev,
+                                     NULL);     // Cache is still being written, make the request without writing to the cache.
+                }                                   // Since the API requests are very small in comparison to downloading songs, an
+                evbuffer_drain(input, 23); // extra request isn't a big deal.
+                return;
             }
             FILE *fp = fopen(path, "a");
 
-            dispatch_request(http_connection_pool, id, bev, fp);
+            dispatch_request(http_connection_pool, uri, bev, fp);
+            evbuffer_drain(input, 23);
             return;
         }
         case PLAYLIST_INFO: {
-            char id[37] = "/v1/playlists/";
+            if (in_len < 23) return; // Wait for more data
+            uint8_t *id = &in[1];
+            if (!is_valid_id(id)) {
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                evbuffer_drain(input, 23);
+                return;
+            }
+            /*char id[37] = "/v1/playlists/";
             int read = evbuffer_remove(input, &id[14], 22);
             id[36] = 0;
             if (read != 22 || !is_valid_id(&id[14])){
                 write_error(bev, ET_SPOTIFY, "Invalid track id");
                 return;
-            }
+            }*/
+            char uri[37] = "/v1/playlists/";
+            memcpy(&uri[14], id, 22);
+            uri[36] = 0;
 
             char path[37] = "playlist_info/";
             memcpy(&path[14], &id[14], 23);
@@ -797,24 +822,37 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 if (len - sizeof(read_size) == read_size) {
                     evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
                 } else {
-                    dispatch_request(http_connection_pool, id, bev,
-                                     NULL); // Cache is still being written, make the request without writing to the cache.
-                }                               // Since the API requests are very small in comparison to downloading songs, an
-                return;                         // extra request isn't a big deal.
+                    dispatch_request(http_connection_pool, uri, bev,
+                                     NULL);     // Cache is still being written, make the request without writing to the cache.
+                }                                   // Since the API requests are very small in comparison to downloading songs, an
+                evbuffer_drain(input, 23);// extra request isn't a big deal.
+                return;
             }
             FILE *fp = fopen(path, "a");
 
-            dispatch_request(http_connection_pool, id, bev, fp);
+            dispatch_request(http_connection_pool, uri, bev, fp);
+            evbuffer_drain(input, 23);
             return;
         }
         case ALBUM_INFO: {
-            char id[34] = "/v1/albums/";
+            if (in_len < 23) return; // Wait for more data
+            uint8_t *id = &in[1];
+            if (!is_valid_id(id)) {
+                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                evbuffer_drain(input, 23);
+                return;
+            }
+            /*char id[34] = "/v1/albums/";
             int read = evbuffer_remove(input, &id[11], 22);
             id[33] = 0;
             if (read != 22 || !is_valid_id(&id[11])){
                 write_error(bev, ET_SPOTIFY, "Invalid track id");
                 return;
-            }
+            }*/
+
+            char uri[34] = "/v1/albums/";
+            memcpy(&uri[11], id, 22);
+            uri[33] = 0;
 
             char path[34] = "album_info/";
             memcpy(&path[11], &id[11], 23);
@@ -831,20 +869,78 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 if (len - sizeof(read_size) == read_size) {
                     evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
                 } else {
-                    dispatch_request(http_connection_pool, id, bev,
-                                     NULL); // Cache is still being written, make the request without writing to the cache.
-                }                               // Since the API requests are very small in comparison to downloading songs, an
-                return;                         // extra request isn't a big deal.
+                    dispatch_request(http_connection_pool, uri, bev,
+                                     NULL);     // Cache is still being written, make the request without writing to the cache.
+                }                                   // Since the API requests are very small in comparison to downloading songs, an
+                evbuffer_drain(input, 23);// extra request isn't a big deal.
+                return;
             }
             FILE *fp = fopen(path, "a");
 
-            dispatch_request(http_connection_pool, id, bev, fp);
+            dispatch_request(http_connection_pool, uri, bev, fp);
+            evbuffer_drain(input, 23);
             return;
         }
         case RECOMMENDATIONS: {
-
+            if (in_len < 25) return;
+            uint8_t *n = &in[1];// 0: number of seed tracks, 1: number of seed artists TODO: Support seed genres
+            size_t sum = n[0] + n[1];
+            size_t expected_len = sum * 22;
+            if (sum > 5) { // There can be a maximum of 5 seed tracks, artists and genres in total
+                write_error(bev, ET_SPOTIFY, "Maximum of 5 seed tracks, artists in total are allowed");
+                evbuffer_drain(input, 3 + expected_len);
+                return;
+            } else if (sum < 1) {
+                write_error(bev, ET_SPOTIFY, "At least 1 seed track, artist must be provided");
+                evbuffer_drain(input, 3 + expected_len);
+                return;
+            }
+            if (in_len < 3 + expected_len) return; // Not enough data
+            //&limit=10
+            size_t uri_len = (n[0] != 0) * (13 + n[0] * 22 + (n[0] - 1)) +
+                             (n[1] != 0) * (14 + n[1] * 22 + (n[1] - 1)) +
+                             19 + 9 + 1;
+            char uri[uri_len];
+            char *uri_b = uri;
+            uint8_t *ids = &in[3];
+            memcpy(uri_b, "/v1/recommendations?", 20);
+            uri_b += 20;
+            if (n[0] != 0) {
+                memcpy(uri_b, "seed_tracks=", 12);
+                uri_b += 12;
+                for (int i = 0; i < n[0]; ++i) {
+                    if (i != 0) {
+                        *(uri_b++) = ',';
+                    }
+                    memcpy(uri_b, ids, 22);
+                    ids += 22;
+                    uri_b += 22;
+                }
+            }
+            if (n[1] != 0) {
+                if (n[0] != 0) {
+                    *(uri_b++) = '&';
+                }
+                memcpy(uri_b, "seed_artists=", 13);
+                uri_b += 13;
+                for (int i = 0; i < n[1]; ++i) {
+                    if (i != 0) {
+                        *(uri_b++) = ',';
+                    }
+                    memcpy(uri_b, ids, 22);
+                    ids += 22;
+                    uri_b += 22;
+                }
+            }
+            memcpy(uri_b, "&limit=30", 9);
+            uri[uri_len - 1] = 0;
+            printf("Performing request using uri: %s\n", uri);
+            dispatch_request(http_connection_pool, uri, bev, NULL);
+            evbuffer_drain(input, expected_len + 3);
+            return;
         }
-        default:; //Invalid data
+        default:
+            evbuffer_drain(input, 1); //Invalid data
     }
 }
 

@@ -15,7 +15,7 @@ struct userp {
     struct event_base *base;
     size_t file_len;
     size_t progress;
-    char track[23];
+    char track[3+22*2];
 };
 
 enum error_type{
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
     struct userp userp;
     struct timeval timeout;
 
-    if (argc != 2) return -1;
+    if (argc < 2) return -1;
 
     timeout.tv_sec = 30;
     timeout.tv_usec = 0;
@@ -108,8 +108,11 @@ int main(int argc, char **argv) {
     userp.fp = fopen(fname, "w");
     userp.file_len = 0;
     userp.progress = 0;
-    userp.track[0] = 0;
-    memcpy(&userp.track[1], argv[1], sizeof(userp.track)-1);
+    userp.track[0] = 4;
+    userp.track[1] = 2;
+    userp.track[2] = 0;
+    memcpy(&userp.track[3], argv[1], 22);
+    memcpy(&userp.track[3+22], argv[2], 22);
 
     base = event_base_new();
     userp.base = base;
