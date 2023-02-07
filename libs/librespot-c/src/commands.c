@@ -75,8 +75,10 @@ command_cb_async(struct commands_base *cmdbase, struct command *cmd) {
     cmdstate = cmd->func(cmd->arg, &cmd->ret, cmd);
 
     // Only free arg if there are no pending events (used in worker.c)
-    if (cmdstate != COMMAND_PENDING && cmd->arg)
+    if (cmdstate != COMMAND_PENDING && cmd->arg){
         free(cmd->arg);
+        cmd->arg = NULL;
+    }
 
     free(cmd);
 
@@ -107,6 +109,7 @@ command_cb_sync(struct commands_base *cmdbase, struct command *cmd) {
             write(cmdbase->fd, &cmd->data, sizeof(cmd->data));
         }
         free(cmd->arg);
+        cmd->arg = NULL;
         free(cmd);
 //      pthread_mutex_unlock(&cmdbase->mutex);
 
@@ -289,6 +292,7 @@ commands_exec_end(struct commands_base *cmdbase, int retvalue, struct sp_session
         write(cmdbase->fd, &current_cmd->data, sizeof(current_cmd->data));
     }
     free(current_cmd->arg);
+    current_cmd->arg = NULL;
     free(current_cmd);
     session->current_cmd = NULL;
 

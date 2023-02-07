@@ -15,12 +15,13 @@ struct userp {
     struct event_base *base;
     size_t file_len;
     size_t progress;
-    char track[3+22*2];
+    char track[1+22];
 };
 
 enum error_type{
     ET_NO_ERROR,
     ET_SPOTIFY,
+    ET_SPOTIFY_INTERNAL,
     ET_HTTP,
     ET_FULL
 };
@@ -108,11 +109,12 @@ int main(int argc, char **argv) {
     userp.fp = fopen(fname, "w");
     userp.file_len = 0;
     userp.progress = 0;
-    userp.track[0] = 4;
-    userp.track[1] = 2;
+    userp.track[0] = 0;
+    /*userp.track[1] = 2;
     userp.track[2] = 0;
     memcpy(&userp.track[3], argv[1], 22);
-    memcpy(&userp.track[3+22], argv[2], 22);
+    memcpy(&userp.track[3+22], argv[2], 22);*/
+    memcpy(&userp.track[1], argv[1], 22);
 
     base = event_base_new();
     userp.base = base;

@@ -108,7 +108,7 @@ librespotc_open(const char *path, struct sp_session *session, cmd_callback cmd_c
 // A read of the fd that returns 0 means end of track, and a negative read
 // return value means error. progress_cb and cb_arg optional.
 void
-librespotc_write(struct sp_session *session, cmd_callback cmd_cb, void *cb_arg);
+librespotc_write(struct sp_session *session);
 
 // Seeks to pos (measured in bytes, so must not exceed file_len), flushes old
 // data from the fd and prepares one chunk of data for reading.

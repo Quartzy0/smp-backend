@@ -221,7 +221,6 @@ session_error(struct sp_session *session, enum sp_error err) {
     };
     sp_cb.logmsg("Session error: %s - %s (%d) (occurred before msg %d, queue %d)\n", err_c[err + 9], sp_errmsg, err,
                  session->msg_type_next, session->msg_type_queued);
-    if (session->error_callback) session->error_callback(session, err, session->err_userp);
 
     session_return(session, err);
 
@@ -234,6 +233,7 @@ session_error(struct sp_session *session, enum sp_error err) {
     session->now_streaming_channel = NULL;
 
     ap_disconnect(&session->conn);
+    if (session->error_callback) session->error_callback(session, err, session->err_userp);
 }
 
 // Called if an access point disconnects. Will clear current connection and
@@ -772,7 +772,7 @@ librespotc_seek(struct sp_session *session, size_t pos, cmd_callback cmd_cb, voi
 
 // Starts writing audio for the caller to read from the file descriptor
 void
-librespotc_write(struct sp_session *session, cmd_callback cmd_cb, void *cb_arg) {
+librespotc_write(struct sp_session *session) {
     struct sp_cmdargs *cmdargs;
 
     cmdargs = calloc(1, sizeof(struct sp_cmdargs));
@@ -832,8 +832,12 @@ librespotc_login_stored_cred(const char *username, uint8_t *stored_cred, size_t 
     cmdargs->stored_cred = stored_cred;
     cmdargs->stored_cred_len = stored_cred_len;
     cmdargs->session_out = session;
+    struct cmd_data data = {
+            .cb = cmd_cb,
+            .userp = cb_arg
+    };
 
-    commands_exec_sync(sp_cmdbase, login, login_bh, cmdargs, SP_CMD_DATA_EMPTY);
+    commands_exec_sync(sp_cmdbase, login, login_bh, cmdargs, data);
 }
 
 void
@@ -853,11 +857,13 @@ librespotc_login_token(const char *username, const char *token, struct sp_sessio
 
 int
 librespotc_logout(struct sp_session *session) {
-    struct sp_cmdargs cmdargs = {0};
+    struct sp_cmdargs *cmdargs = calloc(1, sizeof(struct sp_cmdargs));
 
-    cmdargs.session = session;
+    assert(cmdargs);
 
-    return commands_exec_sync(sp_cmdbase, logout, NULL, &cmdargs, SP_CMD_DATA_EMPTY);
+    cmdargs->session = session;
+
+    return commands_exec_sync(sp_cmdbase, logout, NULL, cmdargs, SP_CMD_DATA_EMPTY);
 }
 
 size_t

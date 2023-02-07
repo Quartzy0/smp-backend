@@ -8,7 +8,7 @@ add_subdirectory(test)
 
 find_package(OpenSSL REQUIRED)
 
-add_executable(smp_backend src/main.c src/librespot-util.c src/librespot-util.h src/openssl_hostname_validation.c src/openssl_hostname_validation.h src/hostcheck.c src/hostcheck.h src/cmd.h src/vec.c src/vec.h src/debug.h)
+add_executable(smp_backend src/main.c src/librespot-util.c src/librespot-util.h src/openssl_hostname_validation.c src/openssl_hostname_validation.h src/hostcheck.c src/hostcheck.h src/cmd.h src/vec.c src/vec.h src/debug.h src/http.c src/http.h src/defs.h src/spotify.c src/spotify.h)
 
 target_include_directories(smp_backend PRIVATE libs/librespot-c)
 

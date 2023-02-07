@@ -2,3 +2,8 @@ debug
 cmake-build-debug
 cmake-build-release
 .idea
+build
+.vimspector.json
+compile_commands.json
+.cache
+.ccls-cache
