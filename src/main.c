@@ -25,7 +25,9 @@ typedef enum PacketType {
     MUSIC_INFO = 1,
     PLAYLIST_INFO = 2,
     ALBUM_INFO = 3,
-    RECOMMENDATIONS = 4
+    RECOMMENDATIONS = 4,
+    ARTIST_INFO = 5,
+    SEARCH = 6,
 } PacketType;
 
 struct pools {
@@ -73,6 +75,67 @@ write_error(struct bufferevent *bev, enum error_type err, const char *msg) {
         memset(&data[1], 0, sizeof(size_t));
         bufferevent_write(bev, data, sizeof(data));
     }
+}
+
+void
+http_generic_request(uint8_t *in, struct bufferevent *bev, struct http_connection_pool *http_connection_pool,
+                     const char *uri_in, const char *path_in, bool api, bool insert_id_url) {
+    struct evbuffer *input = bufferevent_get_input(bev);
+
+    uint8_t *id = &in[1];
+    if (!is_valid_id(id)) {
+        write_error(bev, ET_SPOTIFY, "Invalid track id");
+        evbuffer_drain(input, 23);
+        return;
+    }
+
+    const char *uri;
+    if (insert_id_url) {
+        size_t uri_in_len = strlen(uri_in);
+        uri = calloc(22 + uri_in_len + 1, sizeof(*uri));
+        memcpy(uri, uri_in, uri_in_len);
+        memcpy(&uri[uri_in_len], id, 22);
+    } else {
+        uri = uri_in;
+    }
+
+    size_t path_in_len = strlen(path_in);
+    char *path = calloc(22 + path_in_len + 1, sizeof(*path));
+    memcpy(path, path_in, path_in_len);
+    memcpy(&path[path_in_len], id, 22);
+
+    if (!access(path, R_OK)) {
+        FILE *fp = fopen(path, "r");
+        size_t read_size = 0;
+        fread(&read_size, sizeof(read_size), 1, fp);
+
+        fseek(fp, 0L, SEEK_END);
+        int64_t len = ftell(fp);
+        rewind(fp);
+
+        if (len - sizeof(read_size) == read_size) {
+            evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
+        } else {
+            if (api) {
+                http_dispatch_request_api(http_connection_pool, uri, bev,
+                                          NULL);
+            } else {
+                http_dispatch_request_partner(http_connection_pool, uri, bev,
+                                              NULL);
+            }
+            // Cache is still being written, make the request without writing to the cache.
+        }                                   // Since the API requests are very small in comparison to downloading songs, an
+        evbuffer_drain(input, 23);// extra request isn't a big deal.
+        return;
+    }
+    FILE *fp = fopen(path, "a");
+
+    if (api) {
+        http_dispatch_request_api(http_connection_pool, uri, bev, fp);
+    } else {
+        http_dispatch_request_partner(http_connection_pool, uri, bev, fp);
+    }
+    evbuffer_drain(input, 23);
 }
 
 static void
@@ -145,120 +208,17 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
         }
         case MUSIC_INFO: {
             if (in_len < 23) return; // Wait for more data
-            uint8_t *id = &in[1];
-            if (!is_valid_id(id)) {
-                write_error(bev, ET_SPOTIFY, "Invalid track id");
-                evbuffer_drain(input, 23);
-                return;
-            }
-            char uri[34] = "/v1/tracks/";
-            memcpy(&uri[11], id, 22);
-            uri[33] = 0;
-
-            char path[34] = "music_info/";
-            memcpy(&path[11], &id[11], 23);
-
-            if (!access(path, R_OK)) {
-                FILE *fp = fopen(path, "r");
-                size_t read_size = 0;
-                fread(&read_size, sizeof(read_size), 1, fp);
-
-                fseek(fp, 0L, SEEK_END);
-                int64_t len = ftell(fp);
-                rewind(fp);
-
-                if (len - sizeof(read_size) == read_size) {
-                    evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
-                } else {
-                    http_dispatch_request(http_connection_pool, uri, bev,
-                                          NULL);     // Cache is still being written, make the request without writing to the cache.
-                }                                   // Since the API requests are very small in comparison to downloading songs, an
-                evbuffer_drain(input, 23); // extra request isn't a big deal.
-                return;
-            }
-            FILE *fp = fopen(path, "a");
-
-            http_dispatch_request(http_connection_pool, uri, bev, fp);
-            evbuffer_drain(input, 23);
+            http_generic_request(in, bev, http_connection_pool, "/v1/tracks/", "music_info/", true, true);
             return;
         }
         case PLAYLIST_INFO: {
             if (in_len < 23) return; // Wait for more data
-            uint8_t *id = &in[1];
-            if (!is_valid_id(id)) {
-                write_error(bev, ET_SPOTIFY, "Invalid track id");
-                evbuffer_drain(input, 23);
-                return;
-            }
-            char uri[37] = "/v1/playlists/";
-            memcpy(&uri[14], id, 22);
-            uri[36] = 0;
-
-            char path[37] = "playlist_info/";
-            memcpy(&path[14], &id[14], 23);
-
-            if (!access(path, R_OK)) {
-                FILE *fp = fopen(path, "r");
-                size_t read_size = 0;
-                fread(&read_size, sizeof(read_size), 1, fp);
-
-                fseek(fp, 0L, SEEK_END);
-                int64_t len = ftell(fp);
-                rewind(fp);
-
-                if (len - sizeof(read_size) == read_size) {
-                    evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
-                } else {
-                    http_dispatch_request(http_connection_pool, uri, bev,
-                                          NULL);     // Cache is still being written, make the request without writing to the cache.
-                }                                   // Since the API requests are very small in comparison to downloading songs, an
-                evbuffer_drain(input, 23);// extra request isn't a big deal.
-                return;
-            }
-            FILE *fp = fopen(path, "a");
-
-            http_dispatch_request(http_connection_pool, uri, bev, fp);
-            evbuffer_drain(input, 23);
+            http_generic_request(in, bev, http_connection_pool, "/v1/playlists/", "playlist_info/", true, true);
             return;
         }
         case ALBUM_INFO: {
             if (in_len < 23) return; // Wait for more data
-            uint8_t *id = &in[1];
-            if (!is_valid_id(id)) {
-                write_error(bev, ET_SPOTIFY, "Invalid track id");
-                evbuffer_drain(input, 23);
-                return;
-            }
-
-            char uri[34] = "/v1/albums/";
-            memcpy(&uri[11], id, 22);
-            uri[33] = 0;
-
-            char path[34] = "album_info/";
-            memcpy(&path[11], &id[11], 23);
-
-            if (!access(path, R_OK)) {
-                FILE *fp = fopen(path, "r");
-                size_t read_size = 0;
-                fread(&read_size, sizeof(read_size), 1, fp);
-
-                fseek(fp, 0L, SEEK_END);
-                int64_t len = ftell(fp);
-                rewind(fp);
-
-                if (len - sizeof(read_size) == read_size) {
-                    evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
-                } else {
-                    http_dispatch_request(http_connection_pool, uri, bev,
-                                          NULL);     // Cache is still being written, make the request without writing to the cache.
-                }                                   // Since the API requests are very small in comparison to downloading songs, an
-                evbuffer_drain(input, 23);// extra request isn't a big deal.
-                return;
-            }
-            FILE *fp = fopen(path, "a");
-
-            http_dispatch_request(http_connection_pool, uri, bev, fp);
-            evbuffer_drain(input, 23);
+            http_generic_request(in, bev, http_connection_pool, "/v1/albums/", "album_info/", true, true);
             return;
         }
         case RECOMMENDATIONS: {
@@ -315,8 +275,51 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             memcpy(uri_b, "&limit=30", 9);
             uri[uri_len - 1] = 0;
             printf("Performing request using uri: %s\n", uri);
-            http_dispatch_request(http_connection_pool, uri, bev, NULL);
+            http_dispatch_request_api(http_connection_pool, uri, bev, NULL);
             evbuffer_drain(input, expected_len + 3);
+            return;
+        }
+        case ARTIST_INFO: {
+            if (in_len < 23) return; // Wait for more data
+            // TODO: Not yet implemented but will let us get artist's radio & mix
+            http_generic_request(in, bev, http_connection_pool, "/v1/albums/", "artist_info/", false, false);
+            return;
+        }
+        case SEARCH: {
+            if (in_len < 2 + sizeof(uint16_t)) return;
+            uint8_t flags = in[1];
+            uint16_t q_len = *((uint16_t *) &in[2]);
+            if (in_len < 2 + sizeof(uint16_t) + q_len) return;
+
+            char *q_enc = urlencode(&in[2 + sizeof(uint16_t)], q_len);
+            // /v1/search?type=&q=
+            size_t uri_len = 19 + (flags & 1) * 5 + (flags & 2) * 7 + (flags & 4) * 6 + (flags & 8) * 9 + strlen(q_enc);
+            char *uri = calloc(uri_len, sizeof(*uri));
+            strcat(uri, "/v1/search?type=");
+            if (flags & 1){
+                strcat(uri, "track");
+            }
+            if (flags & 2){
+                if (flags & 1) strcat(uri, ",artist");
+                else strcat(uri, "artist");
+            }
+            if (flags & 4){
+                if (flags & 3) strcat(uri, ",album");
+                else strcat(uri, "album");
+            }
+            if (flags & 8){
+                if (flags & 7) strcat(uri, ",playlist");
+                else strcat(uri, "playlist");
+            }
+            strcat(uri, "&q=");
+            strcat(uri, q_enc);
+            free(q_enc);
+
+            printf("url: %s\n", uri);
+
+            http_dispatch_request_api(http_connection_pool, uri, bev, NULL);
+            evbuffer_drain(input, 2 + sizeof(uint16_t) + q_len);
+            free(uri);
             return;
         }
         default:
@@ -377,7 +380,7 @@ int main(int argc, char **argv) {
     struct event_base *base = NULL;
     struct evconnlistener *listener = NULL;
     struct sockaddr_in sin = {0};
-    struct pools pool = {0};
+    static struct pools pool = {0};
     pipe(cmds);
 
     client_count = 0;

@@ -26,12 +26,12 @@ struct session_pool {
         struct event *read_ev;
         bool active;
         FILE *cache_fp;
-        struct write_job write_jobs[MAX_WRITE_JOBS];
-        int write_job_index;
+        struct write_job write_job;
         char id[22];
         char *path;
         size_t progress;
         size_t file_len;
+        uint8_t retries;
     } elements[SESSION_POOL_MAX];
 };
 

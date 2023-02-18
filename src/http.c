@@ -9,6 +9,7 @@
 #include <event2/http.h>
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
+#include <curl/curl.h>
 #include "openssl_hostname_validation.h"
 
 const char SPOTIFY_TOKEN_HEADER_PREFIX[] = "Bearer ";
@@ -70,15 +71,43 @@ static int cert_verify_callback(X509_STORE_CTX *x509_ctx, void *arg) {
                       cert_str, sizeof(cert_str));
 
     if (res == MatchFound) {
-        printf("https server '%s' has this certificate, "
-               "which looks good to me:\n%s\n",
-               host, cert_str);
         return 1;
     } else {
         printf("Got '%s' for hostname '%s' and certificate:\n%s\n",
                res_str, host, cert_str);
         return 0;
     }
+}
+
+int
+http_init_ssl(SSL **ssl, SSL_CTX **ssl_ctx, char *host){
+    (*ssl_ctx) = SSL_CTX_new(SSLv23_method());
+    if (!(*ssl_ctx)) {
+        err_openssl("SSL_CTX_new");
+        return -1;
+    }
+
+    X509_STORE *store;
+    /* Attempt to use the system's trusted root certificates. */
+    store = SSL_CTX_get_cert_store((*ssl_ctx));
+    if (X509_STORE_set_default_paths(store) != 1) {
+        err_openssl("X509_STORE_set_default_paths");
+        return -1;
+    }
+    SSL_CTX_set_verify((*ssl_ctx), SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_cert_verify_callback((*ssl_ctx), cert_verify_callback,
+                                     (void *) host);
+
+    (*ssl) = SSL_new((*ssl_ctx));
+    if ((*ssl) == NULL) {
+        err_openssl("SSL_new()");
+        return -1;
+    }
+
+#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+    // Set hostname for SNI extension
+    SSL_set_tlsext_host_name((*ssl), host);
+#endif
 }
 
 int
@@ -92,62 +121,9 @@ http_init(struct http_connection_pool *pool){
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
 #endif
-    pool->ssl_ctx = SSL_CTX_new(SSLv23_method());
-    if (!pool->ssl_ctx) {
-        err_openssl("SSL_CTX_new");
-        return -1;
-    }
-
-    X509_STORE *store;
-    /* Attempt to use the system's trusted root certificates. */
-    store = SSL_CTX_get_cert_store(pool->ssl_ctx);
-    if (X509_STORE_set_default_paths(store) != 1) {
-        err_openssl("X509_STORE_set_default_paths");
-        return -1;
-    }
-    SSL_CTX_set_verify(pool->ssl_ctx, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_cert_verify_callback(pool->ssl_ctx, cert_verify_callback,
-                                     (void *) SPOTIFY_API_HOST);
-
-    pool->ssl = SSL_new(pool->ssl_ctx);
-    if (pool->ssl == NULL) {
-        err_openssl("SSL_new()");
-        return -1;
-    }
-
-#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-    // Set hostname for SNI extension
-    SSL_set_tlsext_host_name(pool->ssl, SPOTIFY_API_HOST);
-#endif
-
-    //Token SSL
-
-    pool->token_ssl_ctx = SSL_CTX_new(SSLv23_method());
-    if (!pool->token_ssl_ctx) {
-        err_openssl("SSL_CTX_new");
-        return -1;
-    }
-
-    X509_STORE *store_token;
-    /* Attempt to use the system's trusted root certificates. */
-    store_token = SSL_CTX_get_cert_store(pool->token_ssl_ctx);
-    if (X509_STORE_set_default_paths(store_token) != 1) {
-        err_openssl("X509_STORE_set_default_paths");
-        return -1;
-    }
-    SSL_CTX_set_verify(pool->token_ssl_ctx, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_cert_verify_callback(pool->token_ssl_ctx, cert_verify_callback,
-                                     (void *) SPOTIFY_TOKEN_HOST);
-
-    pool->token_ssl = SSL_new(pool->token_ssl_ctx);
-    if (pool->token_ssl == NULL) {
-        err_openssl("SSL_new()");
-        return -1;
-    }
-#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
-    // Set hostname for SNI extension
-    SSL_set_tlsext_host_name(pool->token_ssl, SPOTIFY_TOKEN_HOST);
-#endif
+    http_init_ssl(&pool->ssl_api, &pool->ssl_ctx_api, SPOTIFY_API_HOST);
+    http_init_ssl(&pool->token_ssl, &pool->token_ssl_ctx, SPOTIFY_TOKEN_HOST);
+    http_init_ssl(&pool->ssl_partner, &pool->ssl_ctx_partner, SPOTIFY_PARTNER_HOST);
     // End initializing OpenSSL
 }
 
@@ -220,9 +196,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
         return;
     }
 
-    struct write_job *wj = &state->write_jobs[state->write_job_index++];
-    if (state->write_job_index >= MAX_WRITE_JOBS) state->write_job_index = 0;
-    while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+    struct write_job *wj = &state->write_job;
 
     int offset = 0;
     if (!state->response_size) {
@@ -233,18 +207,25 @@ http_get_cb(struct evhttp_request *req, void *arg) {
 
         offset = sizeof(state->response_size) + 1;
         enum error_type no_err = ET_NO_ERROR;
-        memcpy(wj->tmp, &no_err, 1);
-        memcpy(&wj->tmp[1], &state->response_size, sizeof(state->response_size));
+        memcpy(&wj->tmp[wj->current_buf][wj->offset], &no_err, 1);
+        memcpy(&wj->tmp[wj->current_buf][wj->offset+1], &state->response_size, sizeof(state->response_size));
     }
     struct evbuffer *req_data = evhttp_request_get_input_buffer(req);
 
-    size_t got = evbuffer_copyout(req_data, &wj->tmp[offset], MAX_BYTES_PER_READ - offset);
+    size_t got = evbuffer_copyout(req_data, &wj->tmp[wj->current_buf][wj->offset+offset], MAX_BYTES_PER_READ - offset);
 
-    evbuffer_add(output, wj->tmp, got + offset);
+    evbuffer_add(output, &wj->tmp[wj->current_buf][wj->offset], got + offset);
 
-    wj->cb.aio_buf = wj->tmp;
-    wj->cb.aio_nbytes = got + offset;
-    aio_write(&wj->cb);
+    if(MAX_WRITE_BUFFER_SIZE - (wj->offset + got + offset) < MAX_BYTES_PER_READ * 2) {
+        while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+        wj->cb.aio_buf = wj->tmp[wj->current_buf];
+        wj->cb.aio_nbytes = wj->offset + got + offset;
+        aio_write(&wj->cb);
+        wj->offset = 0;
+        wj->current_buf = !wj->current_buf;
+    }else{
+        wj->offset += got + offset;
+    }
 }
 
 static void
@@ -301,8 +282,15 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
         write_error_evb(state->output, ET_HTTP, req->response_code_line);
     }
     if (state->fp) {
-        for (int i = 0; i < MAX_WRITE_JOBS; ++i) { // Wait for all write jobs to finish
-            while (aio_error(&state->write_jobs[i].cb) == EINPROGRESS) {}
+        struct write_job *wj = &state->write_job;
+        while (aio_error(wj) == EINPROGRESS) {}
+        if (wj->offset){
+            wj->cb.aio_buf = wj->tmp[wj->current_buf];
+            wj->cb.aio_nbytes = wj->offset;
+            aio_write(&wj->cb);
+            wj->offset = 0;
+            wj->current_buf = !wj->current_buf;
+            while (aio_error(wj) == EINPROGRESS) {}
         }
         fclose(state->fp);
     }
@@ -313,7 +301,7 @@ int
 http_dispatch_request_state(struct request_state *state) {
     struct evhttp_request *req = evhttp_request_new(http_get_complete_cb, state);
     evhttp_add_header(req->output_headers, "Connection", "keep-alive");
-    evhttp_add_header(req->output_headers, "Host", SPOTIFY_API_HOST);
+    evhttp_add_header(req->output_headers, "Host", state->api ? SPOTIFY_API_HOST : SPOTIFY_PARTNER_HOST);
     evhttp_add_header(req->output_headers, "Authorization", state->pool->token);
     req->chunk_cb = state->fp ? http_get_cb : http_get_no_cache_cb;
     req->cb_arg = state;
@@ -323,7 +311,7 @@ http_dispatch_request_state(struct request_state *state) {
 }
 
 int
-http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp) {
+http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp, SSL *ssl, const char *host, bool api) {
     struct event_base *base = bufferevent_get_base(bev);
 
     struct connection *connection;
@@ -347,12 +335,12 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
 
     if (!connection->active) {
         printf("Activated new connection\n");
-        connection->bev = bufferevent_openssl_socket_new(base, -1, pool->ssl,
+        connection->bev = bufferevent_openssl_socket_new(base, -1, ssl,
                                                          BUFFEREVENT_SSL_CONNECTING,
                                                          BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
         bufferevent_openssl_set_allow_dirty_shutdown(connection->bev, 1);
 
-        connection->connection = evhttp_connection_base_bufferevent_new(base, NULL, connection->bev, SPOTIFY_API_HOST,
+        connection->connection = evhttp_connection_base_bufferevent_new(base, NULL, connection->bev, host,
                                                                         HTTPS_PORT);
         evhttp_connection_set_family(connection->connection, AF_INET);
         evhttp_connection_set_closecb(connection->connection, http_connection_close, connection);
@@ -363,18 +351,18 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
     state->output = bufferevent_get_output(bev);
     state->connection = connection;
     state->pool = pool;
+    state->api = api;
     memcpy(state->request, uri_in, (strlen(uri_in) + 1) > URI_MAX_LEN ? URI_MAX_LEN : (strlen(uri_in) + 1));
     state->token = pool->token;
     if (fp) {
         state->fp = fp;
-        for (int i = 0; i < MAX_WRITE_JOBS; ++i) {
-            state->write_jobs[i].cb.aio_fildes = fileno(fp);
-        }
+        state->write_job.cb.aio_fildes = fileno(fp);
     }
 
     struct evhttp_request *req = evhttp_request_new(http_get_complete_cb, state);
     evhttp_add_header(req->output_headers, "Connection", "keep-alive");
-    evhttp_add_header(req->output_headers, "Host", SPOTIFY_API_HOST);
+    evhttp_add_header(req->output_headers, "Host", host);
+    if (pool->token) evhttp_add_header(req->output_headers, "Authorization", pool->token);
     req->chunk_cb = state->fp ? http_get_cb : http_get_no_cache_cb;
     req->cb_arg = state;
 
@@ -384,10 +372,10 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
 
 void
 http_cleanup(struct http_connection_pool *pool){
-    if (pool->ssl_ctx)
-        SSL_CTX_free(pool->ssl_ctx);
-    if (pool->ssl)
-        SSL_free(pool->ssl);
+    if (pool->ssl_ctx_api)
+        SSL_CTX_free(pool->ssl_ctx_api);
+    if (pool->ssl_api)
+        SSL_free(pool->ssl_api);
     if (pool->token_ssl_ctx)
         SSL_CTX_free(pool->token_ssl_ctx);
     if (pool->token_ssl)
@@ -410,4 +398,9 @@ http_cleanup(struct http_connection_pool *pool){
 	(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20700000L) */
 
     free(pool->token);
+}
+
+char *
+urlencode(const char *src, int len) {
+    return curl_easy_escape(NULL, src, len);
 }

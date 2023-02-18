@@ -17,10 +17,13 @@ struct http_connection_pool {
         bool active;
         size_t active_requests;
     } connections[CONNECTION_POOL_MAX];
-    SSL *ssl;
-    SSL_CTX *ssl_ctx;
+    SSL *ssl_api;
+    SSL_CTX *ssl_ctx_api;
     char *token;
     size_t token_len;
+
+    SSL *ssl_partner;
+    SSL_CTX *ssl_ctx_partner;
 
     //Token refresh connection
     struct connection token_connection;
@@ -35,17 +38,22 @@ struct request_state {
     struct http_connection_pool *pool;
     char request[URI_MAX_LEN];
     char *token;
-    struct write_job write_jobs[MAX_WRITE_JOBS];
+    struct write_job write_job;
     FILE *fp;
-    int write_job_index;
+    bool api; // Is host api.spotify.com or api-partner.spotify.com
 };
 
 int http_init(struct http_connection_pool *pool);
 
 int http_dispatch_request_state(struct request_state *state);
 
-int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp);
+int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp, SSL *ssl, const char *host, bool api);
+
+#define http_dispatch_request_api(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, pool->ssl_api, SPOTIFY_API_HOST, true)
+#define http_dispatch_request_partner(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, pool->ssl_partner, SPOTIFY_PARTNER_HOST, false)
 
 void http_cleanup(struct http_connection_pool *pool);
+
+char *urlencode(const char *src, int len);
 
 #endif //SMP_BACKEND_HTTP_H

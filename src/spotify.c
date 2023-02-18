@@ -39,14 +39,21 @@ clean_element(struct element *element) {
     memset(element, 0, sizeof(*element));
 }
 
-//TODO: Pretty sure this doesn't work
 static void
 session_error(
         struct sp_session *session, enum sp_error err,
         void *userp) { // On session error, create a new session in its place and continue playing the previous song
     if (err == SP_ERR_NOCONNECTION) return;
-    printf("Session error detected, reconnecting\n");
     struct element *element = (struct element *) userp;
+    if (element->retries >= 3){
+        fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.");
+        for (int i = 0; i < element->bev_vec.len; ++i) {
+            write_error(element->bev_vec.el[i], ET_SPOTIFY_INTERNAL, "Failed after 3 retries, disconnecting");
+        }
+        clean_element(element);
+        return;
+    }
+    printf("Session error detected, reconnecting\n");
     element->creds->uses--;
 
     if (element->read_ev) event_free(element->read_ev);
@@ -93,12 +100,21 @@ void
 finish_seek_cb(int ret, void *userp) {
     struct element *element = (struct element *) userp;
     struct event_base *base = element->base;
-
-    memset(element->write_jobs, 0, sizeof(element->write_jobs));
-    for (int i = 0; i < MAX_WRITE_JOBS; ++i) {
-        element->write_jobs[i].cb.aio_fildes = fileno(element->cache_fp);
+    if (ret){
+        fprintf(stderr, "Error when seeking\n"); // TODO: Handle this error
+//        session_error(element->session, SP_ERR_INVALID, element);
+        return;
     }
-    element->read_ev = event_new(base, librespotc_get_session_fd(element->session), EV_READ | EV_PERSIST, audio_read_cb,
+    int fd = librespotc_get_session_fd(element->session);
+    if(fd == -1) {
+        session_error(element->session, SP_ERR_INVALID, element);
+        return;
+    }
+
+    memset(&element->write_job, 0, sizeof(element->write_job));
+    element->write_job.cb.aio_fildes = fileno(element->cache_fp);
+
+    element->read_ev = event_new(base, fd, EV_READ | EV_PERSIST, audio_read_cb,
                                  element);
     event_add(element->read_ev, NULL);
 
@@ -117,6 +133,7 @@ spotify_file_open_cb(int fd, void *userp) {
             write_error_spotify(element->bev_vec.el[i]);
         }
         fclose(element->cache_fp);
+        element->cache_fp = NULL;
         remove(element->path);
         return;
     }
@@ -217,20 +234,22 @@ audio_read_cb(int fd, short what, void *arg) {
     struct element *element = (struct element *) arg;
     size_t got;
 
-    struct write_job *wj = &element->write_jobs[element->write_job_index++];
-    if (element->write_job_index >= MAX_WRITE_JOBS) element->write_job_index = 0;
-    // TODO: Figure out how to handle this asynchronously
-    while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+    struct write_job *wj = &element->write_job;
 
-    got = read(fd, wj->tmp, MAX_BYTES_PER_READ);
+    got = read(fd, &wj->tmp[wj->current_buf][wj->offset], MAX_BYTES_PER_READ);
 
     if (got <= 0) {
         printf("Playback ended (%zu)\n", got);
         event_free(element->read_ev);
         librespotc_close(element->session);
-        for (int i = 0; i < MAX_WRITE_JOBS; ++i) { // Wait for all jobs to finish writing before closing
-            while (aio_error(&element->write_jobs[i].cb) == EINPROGRESS) {}
-        } // TODO: Figure out how to handle this asynchronously
+        while (aio_error(&wj->cb) == EINPROGRESS) {}
+        if (wj->offset){
+            wj->cb.aio_buf = wj->tmp[wj->current_buf];
+            wj->cb.aio_nbytes = wj->offset + got;
+            aio_write(&wj->cb);
+            while (aio_error(&wj->cb) == EINPROGRESS) {}
+        }
+
         element->read_ev = NULL;
         vec_free(&element->bev_vec);
         element->active = false;
@@ -240,12 +259,19 @@ audio_read_cb(int fd, short what, void *arg) {
         return;
     }
     element->progress += got;
-    wj->cb.aio_buf = wj->tmp;
-    wj->cb.aio_nbytes = got;
-    aio_write(&wj->cb);
 
     for (int i = 0; i < element->bev_vec.len; ++i) {
-        bufferevent_write(element->bev_vec.el[i], wj->tmp, got);
+        bufferevent_write(element->bev_vec.el[i], &wj->tmp[wj->current_buf][wj->offset], got);
+    }
+    if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
+        while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+        wj->cb.aio_buf = wj->tmp[wj->current_buf];
+        wj->cb.aio_nbytes = wj->offset + got;
+        aio_write(&wj->cb);
+        wj->offset = 0;
+        wj->current_buf = !wj->current_buf;
+    }else{
+        wj->offset += got;
     }
 }
 

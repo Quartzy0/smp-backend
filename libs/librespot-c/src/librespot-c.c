@@ -982,6 +982,7 @@ librespotc_deinit() {
 
 int
 librespotc_get_session_fd(struct sp_session *session) {
+    if (!session || !session->now_streaming_channel) return -1;
     return session->now_streaming_channel->audio_fd[0];
 }
 
