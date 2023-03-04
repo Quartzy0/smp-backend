@@ -122,6 +122,15 @@ tcp_disconnect(int fd) {
     close(fd);
 }
 
+void
+logmsgf(const char *fmt, ...){
+    printf("");
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+}
+
 struct sp_callbacks callbacks =
         {
                 .https_get = https_get,
@@ -131,5 +140,5 @@ struct sp_callbacks callbacks =
                 .thread_name_set = NULL,
 
                 .hexdump  = hexdump_dummy,
-                .logmsg   = (void (*)(const char *, ...)) printf,
+                .logmsg   = logmsgf,
         };

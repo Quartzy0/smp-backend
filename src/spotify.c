@@ -43,16 +43,17 @@ static void
 session_error(
         struct sp_session *session, enum sp_error err,
         void *userp) { // On session error, create a new session in its place and continue playing the previous song
-    if (err == SP_ERR_NOCONNECTION) return;
+    if (err == SP_ERR_NOCONNECTION || err == SP_ERR_TRACK_NOT_FOUND) return;
     struct element *element = (struct element *) userp;
     if (element->retries >= 3){
-        fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.");
+        fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.\n");
         for (int i = 0; i < element->bev_vec.len; ++i) {
             write_error(element->bev_vec.el[i], ET_SPOTIFY_INTERNAL, "Failed after 3 retries, disconnecting");
         }
         clean_element(element);
         return;
     }
+    element->retries++;
     printf("Session error detected, reconnecting\n");
     element->creds->uses--;
 
@@ -112,7 +113,21 @@ finish_seek_cb(int ret, void *userp) {
     }
 
     memset(&element->write_job, 0, sizeof(element->write_job));
-    element->write_job.cb.aio_fildes = fileno(element->cache_fp);
+    if (element->cache_fp){
+        element->write_job.cb.aio_fildes = fileno(element->cache_fp);
+    }
+    if (!element->progress){
+        enum error_type no_err = ET_NO_ERROR;
+        for (int i = 0; i < element->bev_vec.len; ++i) {
+            bufferevent_write(element->bev_vec.el[i], &no_err, 1);
+            bufferevent_write(element->bev_vec.el[i], &element->file_len, sizeof(element->file_len));
+        }
+        if (element->cache_fp){
+            fwrite(&no_err, 1, 1, element->cache_fp);
+            fwrite(&element->file_len, sizeof(element->file_len), 1, element->cache_fp);
+            fflush(element->cache_fp);
+        }
+    }
 
     element->read_ev = event_new(base, fd, EV_READ | EV_PERSIST, audio_read_cb,
                                  element);
@@ -132,7 +147,7 @@ spotify_file_open_cb(int fd, void *userp) {
         for (int i = 0; i < element->bev_vec.len; ++i) {
             write_error_spotify(element->bev_vec.el[i]);
         }
-        fclose(element->cache_fp);
+        if (element->cache_fp) fclose(element->cache_fp);
         element->cache_fp = NULL;
         remove(element->path);
         return;
@@ -145,14 +160,6 @@ spotify_file_open_cb(int fd, void *userp) {
         return;
     }
     element->file_len = librespotc_get_filelen(element->session);
-    enum error_type no_err = ET_NO_ERROR;
-    for (int i = 0; i < element->bev_vec.len; ++i) {
-        bufferevent_write(element->bev_vec.el[i], &no_err, 1);
-        bufferevent_write(element->bev_vec.el[i], &element->file_len, sizeof(element->file_len));
-    }
-    fwrite(&no_err, 1, 1, element->cache_fp);
-    fwrite(&element->file_len, sizeof(element->file_len), 1, element->cache_fp);
-    fflush(element->cache_fp);
     finish_seek_cb(0, userp);
 }
 
@@ -211,6 +218,10 @@ spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id
         pool->elements[uninit].read_ev = NULL;
         pool->elements[uninit].active = true;
         pool->elements[uninit].cache_fp = fopen(pool->elements[uninit].path, "a");
+        if (!pool->elements[uninit].cache_fp){
+            fprintf(stderr, "Error occurred while trying to open file '%s': %s\n", pool->elements[uninit].path,
+                    strerror(errno));
+        }
         memcpy(pool->elements[uninit].id, id, sizeof(pool->elements[uninit].id));
         pool->elements[uninit].creds = creds;
         if (creds->creds.stored_cred_len == 0) {
@@ -242,19 +253,21 @@ audio_read_cb(int fd, short what, void *arg) {
         printf("Playback ended (%zu)\n", got);
         event_free(element->read_ev);
         librespotc_close(element->session);
-        while (aio_error(&wj->cb) == EINPROGRESS) {}
-        if (wj->offset){
-            wj->cb.aio_buf = wj->tmp[wj->current_buf];
-            wj->cb.aio_nbytes = wj->offset + got;
-            aio_write(&wj->cb);
+        if (element->cache_fp){
             while (aio_error(&wj->cb) == EINPROGRESS) {}
+            if (wj->offset){
+                wj->cb.aio_buf = wj->tmp[wj->current_buf];
+                wj->cb.aio_nbytes = wj->offset + got;
+                aio_write(&wj->cb);
+                while (aio_error(&wj->cb) == EINPROGRESS) {}
+            }
+            fclose(element->cache_fp);
+            element->cache_fp = NULL;
         }
 
         element->read_ev = NULL;
         vec_free(&element->bev_vec);
         element->active = false;
-        fclose(element->cache_fp);
-        element->cache_fp = NULL;
         element->progress = 0;
         return;
     }
@@ -263,15 +276,17 @@ audio_read_cb(int fd, short what, void *arg) {
     for (int i = 0; i < element->bev_vec.len; ++i) {
         bufferevent_write(element->bev_vec.el[i], &wj->tmp[wj->current_buf][wj->offset], got);
     }
-    if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
-        while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
-        wj->cb.aio_buf = wj->tmp[wj->current_buf];
-        wj->cb.aio_nbytes = wj->offset + got;
-        aio_write(&wj->cb);
-        wj->offset = 0;
-        wj->current_buf = !wj->current_buf;
-    }else{
-        wj->offset += got;
+    if (element->cache_fp){
+        if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
+            while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+            wj->cb.aio_buf = wj->tmp[wj->current_buf];
+            wj->cb.aio_nbytes = wj->offset + got;
+            aio_write(&wj->cb);
+            wj->offset = 0;
+            wj->current_buf = !wj->current_buf;
+        }else{
+            wj->offset += got;
+        }
     }
 }
 

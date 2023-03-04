@@ -198,7 +198,7 @@ session_return(struct sp_session *session, enum sp_error err) {
     commands_exec_end(sp_cmdbase, err, session);
 }
 
-#define ERROR_ENTRY(x) [x+9]=#x
+#define ERROR_ENTRY(x) [x+10]=#x
 
 // Disconnects after an error situation. If it is a failed login then the
 // session, otherwise we end download and disconnect.
@@ -218,8 +218,9 @@ session_error(struct sp_session *session, enum sp_error err) {
             ERROR_ENTRY(SP_ERR_NOSESSION),
             ERROR_ENTRY(SP_ERR_LOGINFAILED),
             ERROR_ENTRY(SP_ERR_TIMEOUT),
+            ERROR_ENTRY(SP_ERR_TRACK_NOT_FOUND),
     };
-    sp_cb.logmsg("Session error: %s - %s (%d) (occurred before msg %d, queue %d)\n", err_c[err + 9], sp_errmsg, err,
+    sp_cb.logmsg("Session error: %s - %s (%d) (occurred before msg %d, queue %d)\n", err_c[err + 10], sp_errmsg, err,
                  session->msg_type_next, session->msg_type_queued);
 
     session_return(session, err);

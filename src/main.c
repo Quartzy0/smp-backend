@@ -177,8 +177,7 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                 rewind(fp);
 
                 int fd = fileno(fp);
-                evbuffer_add_file(output, fd, 0, -1);
-//                fclose(fp); TODO: Figure out how to close properly
+                evbuffer_add_file(output, fd, 0, -1); // Closes fd when done
                 if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // File is fully written
                     struct element *element = NULL;
                     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
@@ -370,7 +369,6 @@ cmd_read_cb(int fd, short what, void *arg) {
     struct cmd_data data;
     size_t got = read(fd, &data, sizeof(data));
     if (got <= 0) {
-        // TODO: END OF FD
         return;
     }
     if (data.cb) data.cb(data.retval, data.userp);

@@ -27,6 +27,7 @@ enum sp_error {
     SP_ERR_NOSESSION = -7,
     SP_ERR_LOGINFAILED = -8,
     SP_ERR_TIMEOUT = -9,
+    SP_ERR_TRACK_NOT_FOUND = -10,
 };
 
 enum sp_bitrates {
