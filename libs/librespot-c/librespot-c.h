@@ -138,4 +138,7 @@ librespotc_session_error_cb(struct sp_session *session, sp_error_callback cb, vo
 int
 librespotc_get_session_fd(struct sp_session *session);
 
+char*
+librespotc_get_country(struct sp_session *session);
+
 #endif /* !__LIBRESPOT_C_H__ */

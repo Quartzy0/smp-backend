@@ -28,6 +28,7 @@ typedef enum PacketType {
     RECOMMENDATIONS = 4,
     ARTIST_INFO = 5,
     SEARCH = 6,
+    AVAILABLE_REGIONS = 7,
 } PacketType;
 
 struct pools {
@@ -152,11 +153,12 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
     uint8_t *in = evbuffer_pullup(input, -1);
     switch (in[0]) {
         case MUSIC_DATA: {
-            if (in_len < 23) return; // Wait for more data
+            if (in_len < 25) return; // Wait for more data
             uint8_t *id = &in[1];
             if (!is_valid_id(id)) {
+                printf("Invalid track id: %.22s\n", id);
                 write_error(bev, ET_SPOTIFY, "Invalid track id");
-                evbuffer_drain(input, 23);
+                evbuffer_drain(input, 25);
                 return;
             }
             printf("Track requested: %.22s\n", id);
@@ -189,20 +191,22 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
                     if (element) {
                         vec_add(&element->bev_vec, bev);
                         printf("Sending data for '%.22s' from cache while reading\n", id);
-                        evbuffer_drain(input, 23);
+                        evbuffer_drain(input, 25);
                         return;
                     } else {
                         progress = actual_len - sizeof(tmp_data);
                     }
                 } else {
                     printf("Sending data for '%.22s' from cache\n", id);
-                    evbuffer_drain(input, 23);
+                    evbuffer_drain(input, 25);
                     return;
                 }
             }
 
-            spotify_activate_session(session_pool, progress, id, path, bev);
-            evbuffer_drain(input, 23);
+            char *region = &in[23];
+            if (!region[0] && !region[1]) region = NULL;
+            spotify_activate_session(session_pool, progress, id, path, bev, region);
+            evbuffer_drain(input, 25);
             return;
         }
         case MUSIC_INFO: {
@@ -320,6 +324,14 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             evbuffer_drain(input, 2 + sizeof(uint16_t) + q_len);
             free(uri);
             return;
+        }
+        case AVAILABLE_REGIONS: {
+            char resp[sizeof(pool->session_pool.available_region_count) + 1];
+            resp[0] = ET_NO_ERROR;
+            *((size_t*) &resp[1]) = pool->session_pool.available_region_count * 2;
+            evbuffer_add(output, &resp, sizeof(resp));
+            evbuffer_add(output, pool->session_pool.available_regions, pool->session_pool.available_region_count*2);
+            evbuffer_drain(input, 1);
         }
         default:
             evbuffer_drain(input, 1); //Invalid data

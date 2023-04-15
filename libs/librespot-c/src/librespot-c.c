@@ -98,6 +98,7 @@ session_free(struct sp_session *session) {
     ap_disconnect(&session->conn);
 
     event_free(session->continue_ev);
+    session->continue_ev = NULL;
 
     free(session->ap_avoid);
     free(session);
@@ -991,4 +992,9 @@ void
 librespotc_session_error_cb(struct sp_session *session, sp_error_callback cb, void *userp) {
     session->err_userp = userp;
     session->error_callback = cb;
+}
+
+char*
+librespotc_get_country(struct sp_session *session){
+    return session->country;
 }

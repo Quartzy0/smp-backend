@@ -182,8 +182,10 @@ send_command(struct commands_base *cmdbase, struct command *cmd) {
  */
 int
 commands_base_free(struct commands_base *cmdbase) {
-    if (cmdbase->command_event)
+    if (cmdbase->command_event){
         event_free(cmdbase->command_event);
+        cmdbase->command_event = NULL;
+    }
 
     close(cmdbase->command_pipe[0]);
     close(cmdbase->command_pipe[1]);

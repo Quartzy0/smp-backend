@@ -38,6 +38,7 @@ struct request_state {
     struct http_connection_pool *pool;
     char request[URI_MAX_LEN];
     char *token;
+    int token_retries;
     struct write_job write_job;
     FILE *fp;
     bool api; // Is host api.spotify.com or api-partner.spotify.com

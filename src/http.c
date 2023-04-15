@@ -128,36 +128,81 @@ http_init(struct http_connection_pool *pool){
 }
 
 static void
+token_get_completed_cb(struct evhttp_request *req, void *arg);
+
+static void
+http_connection_close(struct evhttp_connection *connection, void *arg);
+
+void
+make_token_request(struct request_state *state){
+    if (state->token_retries++ > 3){
+        fprintf(stderr, "Failed getting token after %d reties\n", state->token_retries);
+        write_error_evb(state->output, ET_HTTP, "Error when getting token");
+        return;
+    }
+    if (!state->pool->token_connection.active) {
+        struct event_base *base = evhttp_connection_get_base(state->connection->connection);
+        state->pool->token_connection.bev = bufferevent_openssl_socket_new(base, -1, state->pool->token_ssl,
+                                                                           BUFFEREVENT_SSL_CONNECTING,
+                                                                           BEV_OPT_CLOSE_ON_FREE |
+                                                                           BEV_OPT_DEFER_CALLBACKS);
+        bufferevent_openssl_set_allow_dirty_shutdown(state->pool->token_connection.bev, 1);
+
+        state->pool->token_connection.connection = evhttp_connection_base_bufferevent_new(base, NULL,
+                                                                                          state->pool->token_connection.bev,
+                                                                                          SPOTIFY_TOKEN_HOST,
+                                                                                          HTTPS_PORT);
+        evhttp_connection_set_family(state->pool->token_connection.connection, AF_INET);
+        evhttp_connection_set_closecb(state->pool->token_connection.connection, http_connection_close,
+                                      &state->pool->token_connection);
+        state->pool->token_connection.active = true;
+    }
+
+    struct evhttp_request *token_req = evhttp_request_new(token_get_completed_cb, state);
+    evhttp_add_header(token_req->output_headers, "Host", SPOTIFY_TOKEN_HOST);
+    evhttp_add_header(token_req->output_headers, "User-Agent",
+                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/78.0");
+    evhttp_add_header(token_req->output_headers, "Accept", "*/*");
+
+    evhttp_make_request(state->pool->token_connection.connection, token_req, EVHTTP_REQ_GET, "/");
+}
+
+static void
 token_get_completed_cb(struct evhttp_request *req, void *arg) {
     printf("Got token response: %d %s\n", req->response_code, req->response_code_line);
     struct request_state *state = (struct request_state *) arg;
+    if (req->response_code != 200) goto fail;
 
     struct evbuffer *buf = evhttp_request_get_input_buffer(req);
     struct evbuffer_ptr ptr = evbuffer_search(buf, "\"accessToken\":\"", 15, NULL);
-    if (ptr.pos != -1){
-        evbuffer_ptr_set(buf, &ptr, 15, EVBUFFER_PTR_ADD);
-        struct evbuffer_ptr end_ptr = evbuffer_search(buf, "\"", 1, &ptr);
-        if (end_ptr.pos == -1) goto fail;
-        size_t token_len = (end_ptr.pos-ptr.pos) + SPOTIFY_TOKEN_HEADER_PREFIX_LEN + 1;
-        if (state->pool->token_len != token_len){
-            free(state->pool->token);
-            state->pool->token = NULL;
-            state->pool->token_len = 0;
-        }
-        if (!state->pool->token){
-            state->pool->token = malloc(token_len);
-            state->pool->token_len = token_len;
-        }
-        evbuffer_copyout_from(buf, &ptr, &state->pool->token[SPOTIFY_TOKEN_HEADER_PREFIX_LEN], token_len - SPOTIFY_TOKEN_HEADER_PREFIX_LEN - 1);
-        state->pool->token[token_len-1] = 0;
-        memcpy(state->pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
-        state->token = state->pool->token;
-        printf("Got token: %s\n", state->pool->token);
-    }else{
-        fail:
-        printf("Unable to get token\n");
+    if (ptr.pos == -1) goto fail;
+
+    evbuffer_ptr_set(buf, &ptr, 15, EVBUFFER_PTR_ADD);
+    struct evbuffer_ptr end_ptr = evbuffer_search(buf, "\"", 1, &ptr);
+    if (end_ptr.pos == -1) goto fail;
+
+    size_t token_len = (end_ptr.pos-ptr.pos) + SPOTIFY_TOKEN_HEADER_PREFIX_LEN + 1;
+    if (state->pool->token_len != token_len){
+        free(state->pool->token);
+        state->pool->token = NULL;
+        state->pool->token_len = 0;
     }
+    if (!state->pool->token){
+        state->pool->token = malloc(token_len);
+        state->pool->token_len = token_len;
+    }
+    evbuffer_copyout_from(buf, &ptr, &state->pool->token[SPOTIFY_TOKEN_HEADER_PREFIX_LEN], token_len - SPOTIFY_TOKEN_HEADER_PREFIX_LEN - 1);
+    state->pool->token[token_len-1] = 0;
+    memcpy(state->pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
+    state->token = state->pool->token;
+
+    printf("Got token: %s\n", state->pool->token);
     http_dispatch_request_state(state);
+    return;
+
+    fail:
+    printf("Unable to get token, retrying\n");
+    make_token_request(state);
 }
 
 static void
@@ -252,31 +297,7 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
 
         printf("access token expired, getting new one\n");
 
-        if (!state->pool->token_connection.active) {
-            struct event_base *base = evhttp_connection_get_base(state->connection->connection);
-            state->pool->token_connection.bev = bufferevent_openssl_socket_new(base, -1, state->pool->token_ssl,
-                                                                               BUFFEREVENT_SSL_CONNECTING,
-                                                                               BEV_OPT_CLOSE_ON_FREE |
-                                                                               BEV_OPT_DEFER_CALLBACKS);
-            bufferevent_openssl_set_allow_dirty_shutdown(state->pool->token_connection.bev, 1);
-
-            state->pool->token_connection.connection = evhttp_connection_base_bufferevent_new(base, NULL,
-                                                                                              state->pool->token_connection.bev,
-                                                                                              SPOTIFY_TOKEN_HOST,
-                                                                                              HTTPS_PORT);
-            evhttp_connection_set_family(state->pool->token_connection.connection, AF_INET);
-            evhttp_connection_set_closecb(state->pool->token_connection.connection, http_connection_close,
-                                          &state->pool->token_connection);
-            state->pool->token_connection.active = true;
-        }
-
-        struct evhttp_request *token_req = evhttp_request_new(token_get_completed_cb, arg);
-        evhttp_add_header(token_req->output_headers, "Host", SPOTIFY_TOKEN_HOST);
-        evhttp_add_header(token_req->output_headers, "User-Agent",
-                          "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/78.0");
-        evhttp_add_header(token_req->output_headers, "Accept", "*/*");
-
-        evhttp_make_request(state->pool->token_connection.connection, token_req, EVHTTP_REQ_GET, "/");
+        make_token_request(state);
         return;
     } else if (req->response_code != 200) {
         write_error_evb(state->output, ET_HTTP, req->response_code_line);

@@ -43,11 +43,15 @@ channel_free(struct sp_channel *channel) {
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
         return;
 
-    if (channel->audio_buf)
+    if (channel->audio_buf) {
         evbuffer_free(channel->audio_buf);
+        channel->audio_buf = NULL;
+    }
 
-    if (channel->audio_write_ev)
+    if (channel->audio_write_ev){
         event_free(channel->audio_write_ev);
+        channel->audio_write_ev = NULL;
+    }
 
     if (channel->audio_fd[0] >= 0)
         close(channel->audio_fd[0]);

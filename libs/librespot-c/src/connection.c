@@ -281,15 +281,23 @@ connection_clear(struct sp_connection *conn) {
     if (!conn)
         return;
 
-    if (conn->response_bev)
+    if (conn->response_bev){
         bufferevent_free(conn->response_bev);
-    if (conn->idle_ev)
+        conn->response_bev = NULL;
+    }
+    if (conn->idle_ev){
         event_free(conn->idle_ev);
-    if (conn->timeout_ev)
+        conn->idle_ev = NULL;
+    }
+    if (conn->timeout_ev){
         event_free(conn->timeout_ev);
+        conn->timeout_ev = NULL;
+    }
 
-    if (conn->handshake_packets)
+    if (conn->handshake_packets){
         evbuffer_free(conn->handshake_packets);
+        conn->handshake_packets = NULL;
+    }
 //    if (conn->incoming)
 //        evbuffer_free(conn->incoming);
 
@@ -351,7 +359,7 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
     if (bufferevent_socket_connect_hostname(conn->response_bev, NULL, AF_UNSPEC, conn->ap_address, conn->ap_port)) {
         /* Error starting connection */
         bufferevent_free(conn->response_bev);
-        return -1;
+        RETURN_ERROR(SP_ERR_NOCONNECTION, "Couldn't create bufferevent connection");
     }
     conn->timeout_ev = evtimer_new(cb->evbase, cb->timeout_cb, conn);
 
@@ -772,7 +780,7 @@ response_mercury_req(uint8_t *payload, size_t payload_len, struct sp_session *se
 
     ret = file_select(channel->file.id, sizeof(channel->file.id), mercury.parts[0].track, session->bitrate_preferred);
     if (ret < 0)
-        RETURN_ERROR(SP_ERR_INVALID, "Could not find track data");
+        RETURN_ERROR(SP_ERR_TRACK_NOT_FOUND, "Could not find track data");
 
     mercury_free(&mercury, 1);
 

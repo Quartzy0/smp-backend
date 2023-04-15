@@ -57,7 +57,10 @@ session_error(
     printf("Session error detected, reconnecting\n");
     element->creds->uses--;
 
-    if (element->read_ev) event_free(element->read_ev);
+    if (element->read_ev){
+        event_free(element->read_ev);
+        element->read_ev = NULL;
+    }
 
     librespotc_close(element->session);
     librespotc_logout(element->session); // Log out just in case
@@ -176,8 +179,16 @@ session_cb(int ret, void *userp) {
         remove(element->path);
         return;
     }
-    printf("Created spotify session (%d)\n", ret);
+    char *region = librespotc_get_country(element->session);
+    printf("Created spotify session (%d). Region: %.2s\n", ret, region);
     librespotc_session_error_cb(element->session, session_error, element);
+
+    if (region[0] != element->creds->region[0] || region[1] != element->creds->region[1]){ // Correct region in case it's wrong
+        printf("Region mismatch found for account '%s'. Correcting from %.2s to %.2s\n", element->creds->creds.username, element->creds->region, region);
+        element->creds->region[0] = region[0];
+        element->creds->region[1] = region[1];
+        spotify_update_available_regions(element->parent);
+    }
 
     int r = librespotc_open(element->id, element->session, spotify_file_open_cb, userp);
     if (r) {
@@ -186,14 +197,15 @@ session_cb(int ret, void *userp) {
 }
 
 struct element *
-spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path,
-                         struct bufferevent *bev) {
+spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path, struct bufferevent *bev,
+                         char *region) {
 
     int uninit = -1;
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-        if (!pool->elements[i].active) {
+        if (!pool->elements[i].active && (!region || (region[0] == pool->elements[i].creds->region[0] && region[1] == pool->elements[i].creds->region[1]))) {
             if (pool->elements[i].session) {
                 pool->elements[i].active = true;
+                pool->elements[i].parent = pool;
                 pool->elements[i].progress = progress;
                 memcpy(pool->elements[i].id, id, sizeof(pool->elements[i].id));
                 pool->elements[i].path = strdup(path);
@@ -217,6 +229,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id
         pool->elements[uninit].base = bufferevent_get_base(bev);
         pool->elements[uninit].read_ev = NULL;
         pool->elements[uninit].active = true;
+        pool->elements[uninit].parent = pool;
         pool->elements[uninit].cache_fp = fopen(pool->elements[uninit].path, "a");
         if (!pool->elements[uninit].cache_fp){
             fprintf(stderr, "Error occurred while trying to open file '%s': %s\n", pool->elements[uninit].path,
@@ -252,6 +265,7 @@ audio_read_cb(int fd, short what, void *arg) {
     if (got <= 0) {
         printf("Playback ended (%zu)\n", got);
         event_free(element->read_ev);
+        element->read_ev = NULL;
         librespotc_close(element->session);
         if (element->cache_fp){
             while (aio_error(&wj->cb) == EINPROGRESS) {}
@@ -265,7 +279,6 @@ audio_read_cb(int fd, short what, void *arg) {
             element->cache_fp = NULL;
         }
 
-        element->read_ev = NULL;
         vec_free(&element->bev_vec);
         element->active = false;
         element->progress = 0;
@@ -293,7 +306,7 @@ audio_read_cb(int fd, short what, void *arg) {
 int
 spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
     if (argc == 2) { // Load credentials from file
-        FILE *fp = fopen(argv[1], "r"); // File format is: <email> <password> <username>\n
+        FILE *fp = fopen(argv[1], "r"); // File format is: <email> <password> <username> <region>\n
         fseek(fp, 0L, SEEK_END);
         size_t n = ftell(fp);
         rewind(fp);
@@ -320,12 +333,22 @@ spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
                 credentials = tmp;
                 credentials_len += 10;
             }
-
             memcpy(credentials[credentials_count].creds.password, nxt, nxt1 - nxt);
+
             nxt1 += 1;
-            nxt = strchr(nxt1, '\n');
+            nxt = strchr(nxt1, ' ');
             if (!nxt) break;
-            memcpy(credentials[credentials_count++].creds.username, nxt1, nxt - nxt1);
+            memcpy(credentials[credentials_count].creds.username, nxt1, nxt - nxt1);
+
+            nxt += 1;
+            nxt1 = strchr(nxt, '\n');
+            if (!nxt1) {
+                memcpy(credentials[credentials_count].region, nxt, sizeof(credentials[credentials_count].region));
+                credentials_count++;
+                break;
+            }
+            memcpy(credentials[credentials_count].region, nxt, sizeof(credentials[credentials_count].region));
+            credentials_count++;
         }
         if (credentials_len > credentials_count) { // Reallocate credentials to be just the right size
             struct credentials *tmp = realloc(credentials, (credentials_count) * sizeof(*tmp));
@@ -337,14 +360,27 @@ spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
         }
         printf("Parsed %zu credentials from %s\n", credentials_count, argv[1]);
     } else { // Load credentials from arguments
-        credentials_count = (argc - 1) / 2;
+        credentials_count = (argc - 1) / 3;
         credentials_last_index = -1;
         credentials = calloc(credentials_count, sizeof(*credentials));
         printf("Detected %zu users from arguments\n", credentials_count);
+        char **argv1 = &argv[1];
         for (int i = 0; i < credentials_count; ++i) {
-            size_t username_len = strlen(argv[i * 2 + 1]), password_len = strlen(argv[i * 2 + 2]);
-            memcpy(credentials[i].creds.username, argv[i * 2 + 1], username_len > 64 ? 64 : username_len);
-            memcpy(credentials[i].creds.password, argv[i * 2 + 2], password_len > 32 ? 32 : password_len);
+            size_t username_len = strlen(argv1[i * 3]), password_len = strlen(argv1[i * 3 + 1]), region_len = strlen(argv1[i * 3 + 2]);
+            memcpy(credentials[i].creds.username, argv1[i * 3], username_len > 64 ? 64 : username_len);
+            memcpy(credentials[i].creds.password, argv1[i * 3 + 1], password_len > 32 ? 32 : password_len);
+            memcpy(credentials[i].region, argv1[i * 3 + 2], region_len > 2 ? 2 : region_len);
+        }
+    }
+    spotify_update_available_regions(pool);
+    printf("Available regions (%d): ", pool->available_region_count);
+    for (int i = 0; i < pool->available_region_count; ++i) {
+        putc(pool->available_regions[i*2], stdout);
+        putc(pool->available_regions[i*2+1], stdout);
+        if (i==pool->available_region_count-1){
+            putc('\n', stdout);
+        }else{
+            putc(' ', stdout);
         }
     }
     memset(pool->elements, 0, sizeof(pool->elements));
@@ -356,6 +392,30 @@ spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
     if (ret < 0) {
         printf("Error initializing Spotify: %s\n", librespotc_last_errmsg());
         return -1;
+    }
+}
+
+void
+spotify_update_available_regions(struct session_pool *pool) {
+    if (pool->available_regions){
+        free(pool->available_regions);
+        pool->available_regions = NULL;
+    }
+    pool->available_region_count = 0;
+    pool->available_regions = calloc(credentials_count, sizeof(*pool->available_regions) * 2);
+    for (int i = 0; i < credentials_count; ++i) {
+        // Check if region already included
+        char *r = memchr(pool->available_regions, credentials[i].region[0], pool->available_region_count * 2 * sizeof(sizeof(*pool->available_regions)));
+        if (r && r[1] == credentials[i].region[1]) continue; // Already included
+
+        pool->available_regions[pool->available_region_count*2] = credentials[i].region[0];
+        pool->available_regions[pool->available_region_count*2+1] = credentials[i].region[1];
+        pool->available_region_count++;
+    }
+    if (pool->available_region_count != credentials_count){ // realloc to exact size
+        char *tmp = realloc(pool->available_regions, pool->available_region_count * sizeof(*pool->available_regions) * 2);
+        if (!tmp) perror("error calling realloc");
+        pool->available_regions = tmp;
     }
 }
 

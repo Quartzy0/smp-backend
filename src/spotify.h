@@ -14,11 +14,13 @@
 static struct sp_sysinfo s_sysinfo;
 struct credentials {
     struct sp_credentials creds;
+    char region[2];
     size_t uses;
 };
 
 struct session_pool {
     struct element {
+        struct session_pool *parent;
         struct sp_session *session;
         struct credentials *creds;
         struct vec bev_vec;
@@ -33,12 +35,17 @@ struct session_pool {
         size_t file_len;
         uint8_t retries;
     } elements[SESSION_POOL_MAX];
+    char *available_regions;
+    size_t available_region_count;
 };
 
 int spotify_init(int argc, char **argv, struct session_pool *pool, int fd);
 
 struct element *
-spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path, struct bufferevent *bev);
+spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path, struct bufferevent *bev,
+                         char *region);
+
+void spotify_update_available_regions(struct session_pool *pool);
 
 void spotify_clean(struct session_pool *pool);
 
