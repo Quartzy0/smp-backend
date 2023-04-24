@@ -7,12 +7,12 @@
 #include <stdbool.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <aio.h>
 #include <event2/thread.h>
 #include <event2/http.h>
 #include "cmd.h"
 #include "vec.h"
 #include <ctype.h>
+#include <sys/stat.h>
 #include "http.h"
 #include "defs.h"
 #include "spotify.h"
@@ -387,6 +387,12 @@ cmd_read_cb(int fd, short what, void *arg) {
 }
 
 int main(int argc, char **argv) {
+    // Create needed directories
+    mkdir("music_info", 0777);
+    mkdir("music_cache", 0777);
+    mkdir("album_info", 0777);
+    mkdir("playlist_info", 0777);
+
     struct event_base *base = NULL;
     struct evconnlistener *listener = NULL;
     struct sockaddr_in sin = {0};

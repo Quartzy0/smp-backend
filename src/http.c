@@ -304,14 +304,14 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
     }
     if (state->fp) {
         struct write_job *wj = &state->write_job;
-        while (aio_error(wj) == EINPROGRESS) {}
+        while (aio_error(&wj->cb) == EINPROGRESS) {}
         if (wj->offset){
             wj->cb.aio_buf = wj->tmp[wj->current_buf];
             wj->cb.aio_nbytes = wj->offset;
             aio_write(&wj->cb);
             wj->offset = 0;
             wj->current_buf = !wj->current_buf;
-            while (aio_error(wj) == EINPROGRESS) {}
+            while (aio_error(&wj->cb) == EINPROGRESS) {}
         }
         fclose(state->fp);
     }
