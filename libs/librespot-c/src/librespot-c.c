@@ -47,11 +47,7 @@ events for proceeding are activated directly.
 "timeout": receive or write took too long to complete
 */
 
-#include <pthread.h>
-#include <assert.h>
-
 #include "librespot-c-internal.h"
-#include "commands.h"
 #include "connection.h"
 #include "channel.h"
 
@@ -59,21 +55,12 @@ events for proceeding are activated directly.
 
 /* -------------------------------- Globals --------------------------------- */
 
-const struct cmd_data SP_CMD_DATA_EMPTY = {0};
-
 // Shared
 struct sp_callbacks sp_cb;
 struct sp_sysinfo sp_sysinfo;
 const char *sp_errmsg;
 
-static struct sp_session *sp_sessions;
-
 static bool sp_initialized;
-
-static pthread_t sp_tid;
-static pthread_t sp_cmd_tid;
-static struct event_base *sp_evbase;
-static struct commands_base *sp_cmdbase;
 
 static struct timeval sp_response_timeout_tv = {SP_AP_TIMEOUT_SECS, 0};
 
@@ -111,20 +98,12 @@ session_cleanup(struct sp_session *session) {
     if (!session)
         return;
 
-    if (session == sp_sessions)
-        sp_sessions = session->next;
-    else {
-        for (s = sp_sessions; s && (s->next != session); s = s->next); /* EMPTY */
-
-        if (s)
-            s->next = session->next;
-    }
-
     session_free(session);
 }
 
 static int
-session_new(struct sp_session **out, struct sp_cmdargs *cmdargs, event_callback_fn cb) {
+session_new(struct sp_session **out, event_callback_fn cb, const char *username, const char *password,
+            const char *stored_cred, size_t stored_cred_len, const char *token, struct event_base *evbase) {
     struct sp_session *session;
     int ret;
 
@@ -132,33 +111,30 @@ session_new(struct sp_session **out, struct sp_cmdargs *cmdargs, event_callback_
     if (!session)
         RETURN_ERROR(SP_ERR_OOM, "Out of memory creating session");
 
-    session->continue_ev = evtimer_new(sp_evbase, cb, session);
+    session->evbase = evbase;
+    session->continue_ev = evtimer_new(evbase, cb, session);
     if (!session->continue_ev)
         RETURN_ERROR(SP_ERR_OOM, "Out of memory creating session event");
 
-    snprintf(session->credentials.username, sizeof(session->credentials.username), "%s", cmdargs->username);
+    snprintf(session->credentials.username, sizeof(session->credentials.username), "%s", username);
 
-    if (cmdargs->stored_cred) {
-        if (cmdargs->stored_cred_len > sizeof(session->credentials.stored_cred))
+    if (stored_cred) {
+        if (stored_cred_len > sizeof(session->credentials.stored_cred))
             RETURN_ERROR(SP_ERR_INVALID, "Invalid stored credential");
 
-        session->credentials.stored_cred_len = cmdargs->stored_cred_len;
-        memcpy(session->credentials.stored_cred, cmdargs->stored_cred, session->credentials.stored_cred_len);
-    } else if (cmdargs->token) {
-        if (strlen(cmdargs->token) > sizeof(session->credentials.token))
+        session->credentials.stored_cred_len = stored_cred_len;
+        memcpy(session->credentials.stored_cred, stored_cred, session->credentials.stored_cred_len);
+    } else if (token) {
+        if (strlen(token) > sizeof(session->credentials.token))
             RETURN_ERROR(SP_ERR_INVALID, "Invalid token");
 
-        session->credentials.token_len = strlen(cmdargs->token);
-        memcpy(session->credentials.token, cmdargs->token, session->credentials.token_len);
+        session->credentials.token_len = strlen(token);
+        memcpy(session->credentials.token, token, session->credentials.token_len);
     } else {
-        snprintf(session->credentials.password, sizeof(session->credentials.password), "%s", cmdargs->password);
+        snprintf(session->credentials.password, sizeof(session->credentials.password), "%s", password);
     }
 
     session->bitrate_preferred = SP_BITRATE_DEFAULT;
-
-    // Add to linked list
-    session->next = sp_sessions;
-    sp_sessions = session;
 
     *out = session;
 
@@ -171,32 +147,24 @@ session_new(struct sp_session **out, struct sp_cmdargs *cmdargs, event_callback_
 
 static int
 session_check(struct sp_session *session) {
-    struct sp_session *s;
-
-    for (s = sp_sessions; s; s = s->next) {
-        if (s == session)
-            return 0;
-    }
-
-    return -1;
+    return session == NULL;
 }
 
 static void
 session_return(struct sp_session *session, enum sp_error err) {
-    struct sp_channel *channel = session->now_streaming_channel;
-    int ret;
+    if (err < 0) return;
 
-    ret = commands_exec_returnvalue(session);
+    /*ret = commands_exec_returnvalue(session);
     if (ret == 0) // Here we are async, i.e. no pending command
     {
         // track_write() completed, close the write end which means reader will
         // get an EOF
         if (channel && channel->state == SP_CHANNEL_STATE_PLAYING && err == SP_OK_DONE)
-            channel_stop(channel);
-        return;
-    }
+            channel_stop(channel); //
+    }*/
+    if (session->cmd_data.cb) session->cmd_data.cb(session->cmd_data.retval, session->cmd_data.userp);
 
-    commands_exec_end(sp_cmdbase, err, session);
+//    commands_exec_end(sp_cmdbase, err, session);
 }
 
 #define ERROR_ENTRY(x) [x+10]=#x
@@ -227,7 +195,7 @@ session_error(struct sp_session *session, enum sp_error err) {
     session_return(session, err);
 
     if (!session->is_logged_in) {
-        session_cleanup(session);
+        if (session->error_callback) session->error_callback(session, err, session->err_userp);
         return;
     }
 
@@ -421,10 +389,10 @@ static int
 request_make(enum sp_msg_type type, struct sp_session *session) {
     struct sp_message msg;
     struct sp_connection *conn = &session->conn;
-    struct sp_conn_callbacks cb = {sp_evbase, response_cb, timeout_cb};
+    struct sp_conn_callbacks cb = {session->evbase, response_cb, timeout_cb};
     int ret;
 
-//  sp_cb.logmsg("Making request %d\n", type);
+//    sp_cb.logmsg("Making request %d\n", type);
 
     // Make sure the connection is in a state suitable for sending this message
     ret = ap_connect(&session->conn, type, &session->cooldown_ts, session->ap_avoid, &cb, session);
@@ -463,17 +431,20 @@ request_make(enum sp_msg_type type, struct sp_session *session) {
 
 
 /* ----------------------------- Implementation ----------------------------- */
+struct track_pause_close_wrapper{
+    struct cmd_data orig;
+    struct sp_session *session;
+};
+void
+track_close(int ret, void *userp);
+
 
 // This command is async
-static enum command_state
-track_write(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+track_write(struct sp_session *session) {
     struct sp_channel *channel;
     int ret;
-    session->current_cmd = NULL;
-
-    *retval = 0;
+    memset(&session->cmd_data, 0, sizeof(session->cmd_data));
 
     channel = session->now_streaming_channel;
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
@@ -485,21 +456,28 @@ track_write(void *arg, int *retval, struct command *cmd) {
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
-    return COMMAND_END;
+    return 0;
 
     error:
     sp_cb.logmsg("Error %d: %s", ret, sp_errmsg);
 
-    return COMMAND_END;
+    return 1;
 }
 
-static enum command_state
-track_pause(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
     struct sp_channel *channel;
     int ret;
-    session->current_cmd = cmd;
+    struct track_pause_close_wrapper *wrapper = NULL;
+    if(close){
+        wrapper = calloc(1, sizeof(*wrapper));
+        wrapper->session = session;
+        if(data) memcpy(&wrapper->orig, data, sizeof(*data));
+        session->cmd_data.cb = track_close;
+        session->cmd_data.userp = wrapper;
+    }else{
+        memcpy(&session->cmd_data, data, sizeof(*data));
+    }
 
     channel = session->now_streaming_channel;
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
@@ -509,28 +487,25 @@ track_pause(void *arg, int *retval, struct command *cmd) {
     // case we need that to complete before doing anything else with the channel,
     // e.g. reset it as track_close() does.
     if (channel->state != SP_CHANNEL_STATE_PLAYING) {
-        *retval = 0;
-        return COMMAND_END;
+        return 0;
     }
 
     channel_pause(channel);
     session->msg_type_next = MSG_TYPE_NONE;
 
-    *retval = 1;
-    return COMMAND_PENDING;
+    return 0;
 
     error:
-    *retval = ret;
-    return COMMAND_END;
+    free(wrapper);
+    memset(&session->cmd_data, 0, sizeof(session->cmd_data));
+    return 1;
 }
 
-static enum command_state
-track_seek(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+track_seek(struct cmd_data *cmd_data, struct sp_session *session, size_t seek_pos) {
     struct sp_channel *channel;
     int ret;
-    session->current_cmd = cmd;
+    memcpy(&session->cmd_data, cmd_data, sizeof(*cmd_data));
 
     channel = session->now_streaming_channel;
     if (!channel)
@@ -540,54 +515,51 @@ track_seek(void *arg, int *retval, struct command *cmd) {
 
     // This operation is not safe during chunk downloading because it changes the
     // AES decryptor to match the new position. It also flushes the pipe.
-    channel_seek(channel, cmdargs->seek_pos);
+    channel_seek(channel, seek_pos);
 
     ret = request_make(MSG_TYPE_CHUNK_REQUEST, session);
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
-    *retval = 1;
-    return COMMAND_PENDING;
+    return 0;
 
     error:
-    *retval = ret;
-    return COMMAND_END;
+    return 1;
 }
 
-static enum command_state
-track_close(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
-    int ret;
+void
+track_close(int ret, void *userp) {
+    struct track_pause_close_wrapper *wrapper = (struct track_pause_close_wrapper*) userp;
+    struct sp_session *session = wrapper->session;
 
+    channel_stop(session->now_streaming_channel);
     channel_free(session->now_streaming_channel);
     session->now_streaming_channel = NULL;
 
-    *retval = 0;
-    return COMMAND_END;
+    if (wrapper->orig.cb) wrapper->orig.cb(ret, wrapper->orig.userp);
+    free(wrapper);
 }
 
-static enum command_state
-media_open(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+media_open(struct sp_session *session, const char *path, struct cmd_data *cmd_data) {
     struct sp_channel *channel = NULL;
     enum sp_msg_type type;
     int ret;
-    session->current_cmd = cmd;
 
     ret = session_check(session);
     if (ret < 0)
         RETURN_ERROR(SP_ERR_NOSESSION, "Cannot open media, session is invalid");
 
+    memcpy(&session->cmd_data, cmd_data, sizeof(*cmd_data));
+
     if (session->now_streaming_channel)
         RETURN_ERROR(SP_ERR_OCCUPIED, "Already getting media");
 
-    ret = channel_new(&channel, session, cmdargs->path, sp_evbase, audio_write_cb, SP_MEDIA_TRACK);
+    ret = channel_new(&channel, session, path, session->evbase, audio_write_cb, SP_MEDIA_TRACK);
     if (ret < 0)
         RETURN_ERROR(SP_ERR_OOM, "Could not setup a channel");
 
-    cmdargs->fd_read = channel->audio_fd[0];
+    session->cmd_data.retval = channel->audio_fd[0];
 
     // Must be set before calling request_make() because this info is needed for
     // making the request
@@ -606,8 +578,7 @@ media_open(void *arg, int *retval, struct command *cmd) {
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
-    *retval = 1;
-    return COMMAND_PENDING;
+    return 0;
 
     error:
     if (channel) {
@@ -615,62 +586,36 @@ media_open(void *arg, int *retval, struct command *cmd) {
         channel_free(channel);
     }
 
-    *retval = ret;
-    return COMMAND_END;
+    return 1;
 }
 
-static enum command_state
-media_open_bh(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-
-    if (*retval == SP_OK_DONE)
-        *retval = cmdargs->fd_read;
-
-    return COMMAND_END;
-}
-
-static enum command_state
-login(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
+static int
+login(struct sp_session **session, struct cmd_data *cmd, const char *username, const char *password,
+      const char *stored_cred, size_t stored_cred_len, const char *token, size_t token_len,
+      struct event_base *evbase) {
     int ret;
 
-    ret = session_new(cmdargs->session_out, cmdargs, continue_cb);
+    ret = session_new(session, continue_cb, username, password, stored_cred, stored_cred_len, token, evbase);
     if (ret < 0)
         goto error;
-    (*cmdargs->session_out)->current_cmd = cmd;
+    memcpy(&(*session)->cmd_data, cmd, sizeof(*cmd));
 
-    ret = request_make(MSG_TYPE_CLIENT_HELLO, *cmdargs->session_out);
+    ret = request_make(MSG_TYPE_CLIENT_HELLO, *session);
     if (ret < 0)
         goto error;
 
-    *retval = 1; // Pending command_exec_sync, i.e. response from Spotify
-    return COMMAND_PENDING;
+    return 0; // Pending command_exec_sync, i.e. response from Spotify
 
     error:
-    session_cleanup(*cmdargs->session_out);
+    session_cleanup(*session);
 
-    *retval = ret;
-    return COMMAND_END;
+    return 1;
 }
 
-static enum command_state
-login_bh(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-
-    if (*retval == SP_OK_DONE)
-        (*cmdargs->session_out)->is_logged_in = true;
-    else
-        (*cmdargs->session_out) = NULL;
-
-    return COMMAND_END;
-}
-
-static enum command_state
-logout(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+logout(struct sp_session *session) {
     int ret;
-    session->current_cmd = cmd;
+    memset(&session->cmd_data, 0, sizeof(session->cmd_data));
 
     ret = session_check(session);
     if (ret < 0)
@@ -679,58 +624,25 @@ logout(void *arg, int *retval, struct command *cmd) {
     session_cleanup(session);
 
     error:
-    *retval = ret;
-    return COMMAND_END;
+    return 0;
 }
 
-static enum command_state
-bitrate_set(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
+static int
+bitrate_set(struct sp_session *session, enum sp_bitrates bitrate) {
     int ret;
-    session->current_cmd = cmd;
+    memset(&session->cmd_data, 0, sizeof(session->cmd_data));
 
-    if (cmdargs->bitrate == SP_BITRATE_ANY)
-        cmdargs->bitrate = SP_BITRATE_DEFAULT;
+    if (bitrate == SP_BITRATE_ANY)
+        bitrate = SP_BITRATE_DEFAULT;
 
     ret = session_check(session);
     if (ret < 0)
         RETURN_ERROR(SP_ERR_NOSESSION, "Session has disappeared, cannot set bitrate");
 
-    session->bitrate_preferred = cmdargs->bitrate;
+    session->bitrate_preferred = bitrate;
 
     error:
-    *retval = ret;
-    return COMMAND_END;
-}
-
-static enum command_state
-credentials_get(void *arg, int *retval, struct command *cmd) {
-    struct sp_cmdargs *cmdargs = arg;
-    struct sp_session *session = cmdargs->session;
-    struct sp_credentials *credentials = cmdargs->credentials;
-    int ret;
-    session->current_cmd = cmd;
-
-    ret = session_check(session);
-    if (ret < 0)
-        RETURN_ERROR(SP_ERR_NOSESSION, "Session has disappeared, cannot get credentials");
-
-    memcpy(credentials, &session->credentials, sizeof(struct sp_credentials));
-
-    error:
-    *retval = ret;
-    return COMMAND_END;
-}
-
-
-/* ------------------------------ Event loop -------------------------------- */
-
-static void *
-librespotc(void *arg) {
-    event_base_dispatch(sp_evbase);
-
-    pthread_exit(NULL);
+    return 0;
 }
 
 
@@ -738,112 +650,59 @@ librespotc(void *arg) {
 
 int
 librespotc_open(const char *path, struct sp_session *session, cmd_callback cmd_cb, void *cmd_arg) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-    cmdargs->path = path;
     struct cmd_data data = {
             .cb = cmd_cb,
             .userp = cmd_arg
     };
-
-    return commands_exec_sync(sp_cmdbase, media_open, media_open_bh, cmdargs, data);
+    return media_open(session, path, &data);
 }
 
 int
 librespotc_seek(struct sp_session *session, size_t pos, cmd_callback cmd_cb, void *cmd_arg) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-    cmdargs->seek_pos = pos;
     struct cmd_data data = {
             .cb = cmd_cb,
             .userp = cmd_arg
     };
-
-    return commands_exec_sync(sp_cmdbase, track_seek, NULL, cmdargs, data);
+    return track_seek(&data, session, pos);
 }
 
 // Starts writing audio for the caller to read from the file descriptor
-void
+int
 librespotc_write(struct sp_session *session) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-    cmdargs->progress_cb = NULL;
-    cmdargs->cb_arg = NULL;
-
-    commands_exec_async(sp_cmdbase, track_write, cmdargs);
+    return track_write(session);
 }
 
 int
 librespotc_close(struct sp_session *session) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-
-    return commands_exec_sync(sp_cmdbase, track_pause, track_close, cmdargs, SP_CMD_DATA_EMPTY);
+    return track_pause(NULL, session, true);
 }
 
-void
+int
 librespotc_login_password(const char *username, const char *password, struct sp_session **session, cmd_callback cmd_cb,
-                          void *cb_arg) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->username = username;
-    cmdargs->password = password;
-    cmdargs->session_out = session;
+                          void *cb_arg, struct event_base *evbase) {
     struct cmd_data data = {
             .cb = cmd_cb,
             .userp = cb_arg
     };
 
-    commands_exec_sync(sp_cmdbase, login, login_bh, cmdargs, data);
+    return login(session, &data, username, password, NULL, 0, NULL, 0, evbase);
 }
 
-void
-librespotc_login_stored_cred(const char *username, uint8_t *stored_cred, size_t stored_cred_len,
-                             struct sp_session **session, cmd_callback cmd_cb, void *cb_arg) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->username = username;
-    cmdargs->stored_cred = stored_cred;
-    cmdargs->stored_cred_len = stored_cred_len;
-    cmdargs->session_out = session;
+int
+librespotc_login_stored_cred(const char *username, const char *stored_cred, size_t stored_cred_len,
+                             struct sp_session **session, cmd_callback cmd_cb, void *cb_arg,
+                             struct event_base *evbase) {
     struct cmd_data data = {
             .cb = cmd_cb,
             .userp = cb_arg
     };
 
-    commands_exec_sync(sp_cmdbase, login, login_bh, cmdargs, data);
+    return login(session, &data, username, NULL, stored_cred, stored_cred_len, NULL, 0, evbase);
 }
 
-void
-librespotc_login_token(const char *username, const char *token, struct sp_session **session) {
+/*void
+librespotc_login_token(const char *username, const char *token, struct sp_session **session,
+                       struct event_base *evbase) {
     struct sp_cmdargs *cmdargs;
 
     cmdargs = calloc(1, sizeof(struct sp_cmdargs));
@@ -853,19 +712,14 @@ librespotc_login_token(const char *username, const char *token, struct sp_sessio
     cmdargs->username = username;
     cmdargs->token = token;
     cmdargs->session_out = session;
+    cmdargs->evbase = evbase;
 
     commands_exec_sync(sp_cmdbase, login, login_bh, cmdargs, SP_CMD_DATA_EMPTY);
-}
+}*/
 
 int
 librespotc_logout(struct sp_session *session) {
-    struct sp_cmdargs *cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-
-    return commands_exec_sync(sp_cmdbase, logout, NULL, cmdargs, SP_CMD_DATA_EMPTY);
+    return logout(session);
 }
 
 size_t
@@ -875,30 +729,7 @@ librespotc_get_filelen(struct sp_session *session) {
 
 int
 librespotc_bitrate_set(struct sp_session *session, enum sp_bitrates bitrate) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->session = session;
-    cmdargs->bitrate = bitrate;
-
-    return commands_exec_sync(sp_cmdbase, bitrate_set, NULL, cmdargs, SP_CMD_DATA_EMPTY);
-}
-
-int
-librespotc_credentials_get(struct sp_credentials *credentials, struct sp_session *session) {
-    struct sp_cmdargs *cmdargs;
-
-    cmdargs = calloc(1, sizeof(struct sp_cmdargs));
-
-    assert(cmdargs);
-
-    cmdargs->credentials = credentials;
-    cmdargs->session = session;
-
-    return commands_exec_sync(sp_cmdbase, credentials_get, NULL, cmdargs, SP_CMD_DATA_EMPTY);
+    return bitrate_set(session, bitrate);
 }
 
 const char *
@@ -919,7 +750,7 @@ system_info_set(struct sp_sysinfo *si_out, struct sp_sysinfo *si_user) {
 }
 
 int
-librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks, int fd) {
+librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks) {
     int ret;
 
     if (sp_initialized)
@@ -930,21 +761,6 @@ librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks, int 
 
     system_info_set(&sp_sysinfo, sysinfo);
 
-    sp_evbase = event_base_new();
-    if (!sp_evbase)
-        RETURN_ERROR(SP_ERR_OOM, "event_base_new() failed");
-
-    sp_cmdbase = commands_base_new(sp_evbase, NULL, fd);
-    if (!sp_cmdbase)
-        RETURN_ERROR(SP_ERR_OOM, "commands_base_new() failed");
-
-    ret = pthread_create(&sp_tid, NULL, librespotc, NULL);
-    if (ret < 0)
-        RETURN_ERROR(SP_ERR_OOM, "Could not start thread");
-
-    if (sp_cb.thread_name_set)
-        sp_cb.thread_name_set(sp_tid);
-
     return 0;
 
     error:
@@ -954,32 +770,8 @@ librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks, int 
 
 void
 librespotc_deinit() {
-    struct sp_session *session;
-
-    if (sp_cmdbase) {
-        commands_base_destroy(sp_cmdbase);
-        sp_cmdbase = NULL;
-    }
-
-    for (session = sp_sessions; sp_sessions; session = sp_sessions) {
-        sp_sessions = session->next;
-        session_free(session);
-    }
-
-    if (sp_tid) {
-        pthread_join(sp_tid, NULL);
-    }
-
-    if (sp_evbase) {
-        event_base_loopexit(sp_evbase, NULL);
-        event_base_free(sp_evbase);
-        sp_evbase = NULL;
-    }
-
     sp_initialized = false;
     memset(&sp_cb, 0, sizeof(struct sp_callbacks));
-
-    return;
 }
 
 int

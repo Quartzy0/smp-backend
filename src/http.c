@@ -4,15 +4,21 @@
 
 #include "http.h"
 #include "defs.h"
-#include <event2/bufferevent.h>
 #include <event2/bufferevent_ssl.h>
 #include <event2/http.h>
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
 #include <curl/curl.h>
+#include <unistd.h>
 #include "openssl_hostname_validation.h"
 
 const char SPOTIFY_TOKEN_HEADER_PREFIX[] = "Bearer ";
+
+static int
+http_dispatch_request_state(struct request_state *state);
+
+static int
+dispatch_all_queued_requests(struct http_connection_pool *pool);
 
 static void
 err_openssl(const char *func) {
@@ -108,6 +114,7 @@ http_init_ssl(SSL **ssl, SSL_CTX **ssl_ctx, char *host){
     // Set hostname for SNI extension
     SSL_set_tlsext_host_name((*ssl), host);
 #endif
+    return 0;
 }
 
 int
@@ -125,6 +132,9 @@ http_init(struct http_connection_pool *pool){
     http_init_ssl(&pool->token_ssl, &pool->token_ssl_ctx, SPOTIFY_TOKEN_HOST);
     http_init_ssl(&pool->ssl_partner, &pool->ssl_ctx_partner, SPOTIFY_PARTNER_HOST);
     // End initializing OpenSSL
+
+    vec_init(&pool->queued_requests);
+    return 0;
 }
 
 static void
@@ -134,43 +144,39 @@ static void
 http_connection_close(struct evhttp_connection *connection, void *arg);
 
 void
-make_token_request(struct request_state *state){
-    if (state->token_retries++ > 3){
-        fprintf(stderr, "Failed getting token after %d reties\n", state->token_retries);
-        write_error_evb(state->output, ET_HTTP, "Error when getting token");
-        return;
-    }
-    if (!state->pool->token_connection.active) {
-        struct event_base *base = evhttp_connection_get_base(state->connection->connection);
-        state->pool->token_connection.bev = bufferevent_openssl_socket_new(base, -1, state->pool->token_ssl,
+make_token_request(struct http_connection_pool *pool){
+    if (pool->fetching_token) return;
+    pool->fetching_token = true;
+    if (!pool->token_connection.active) {
+        pool->token_connection.bev = bufferevent_openssl_socket_new(pool->base, -1, pool->token_ssl,
                                                                            BUFFEREVENT_SSL_CONNECTING,
                                                                            BEV_OPT_CLOSE_ON_FREE |
                                                                            BEV_OPT_DEFER_CALLBACKS);
-        bufferevent_openssl_set_allow_dirty_shutdown(state->pool->token_connection.bev, 1);
+        bufferevent_openssl_set_allow_dirty_shutdown(pool->token_connection.bev, 1);
 
-        state->pool->token_connection.connection = evhttp_connection_base_bufferevent_new(base, NULL,
-                                                                                          state->pool->token_connection.bev,
+        pool->token_connection.connection = evhttp_connection_base_bufferevent_new(pool->base, NULL,
+                                                                                          pool->token_connection.bev,
                                                                                           SPOTIFY_TOKEN_HOST,
                                                                                           HTTPS_PORT);
-        evhttp_connection_set_family(state->pool->token_connection.connection, AF_INET);
-        evhttp_connection_set_closecb(state->pool->token_connection.connection, http_connection_close,
-                                      &state->pool->token_connection);
-        state->pool->token_connection.active = true;
+        evhttp_connection_set_family(pool->token_connection.connection, AF_INET);
+        evhttp_connection_set_closecb(pool->token_connection.connection, http_connection_close,
+                                      &pool->token_connection);
+        pool->token_connection.active = true;
     }
 
-    struct evhttp_request *token_req = evhttp_request_new(token_get_completed_cb, state);
+    struct evhttp_request *token_req = evhttp_request_new(token_get_completed_cb, pool);
     evhttp_add_header(token_req->output_headers, "Host", SPOTIFY_TOKEN_HOST);
     evhttp_add_header(token_req->output_headers, "User-Agent",
                       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:78.0) Gecko/20100101 Firefox/78.0");
     evhttp_add_header(token_req->output_headers, "Accept", "*/*");
 
-    evhttp_make_request(state->pool->token_connection.connection, token_req, EVHTTP_REQ_GET, "/");
+    evhttp_make_request(pool->token_connection.connection, token_req, EVHTTP_REQ_GET, "/");
 }
 
 static void
 token_get_completed_cb(struct evhttp_request *req, void *arg) {
     printf("Got token response: %d %s\n", req->response_code, req->response_code_line);
-    struct request_state *state = (struct request_state *) arg;
+    struct http_connection_pool *pool = (struct http_connection_pool *) arg;
     if (req->response_code != 200) goto fail;
 
     struct evbuffer *buf = evhttp_request_get_input_buffer(req);
@@ -182,27 +188,50 @@ token_get_completed_cb(struct evhttp_request *req, void *arg) {
     if (end_ptr.pos == -1) goto fail;
 
     size_t token_len = (end_ptr.pos-ptr.pos) + SPOTIFY_TOKEN_HEADER_PREFIX_LEN + 1;
-    if (state->pool->token_len != token_len){
-        free(state->pool->token);
-        state->pool->token = NULL;
-        state->pool->token_len = 0;
+    if (pool->token_len != token_len){
+        free(pool->token);
+        pool->token = NULL;
+        pool->token_len = 0;
     }
-    if (!state->pool->token){
-        state->pool->token = malloc(token_len);
-        state->pool->token_len = token_len;
+    if (!pool->token){
+        pool->token = malloc(token_len);
+        pool->token_len = token_len;
     }
-    evbuffer_copyout_from(buf, &ptr, &state->pool->token[SPOTIFY_TOKEN_HEADER_PREFIX_LEN], token_len - SPOTIFY_TOKEN_HEADER_PREFIX_LEN - 1);
-    state->pool->token[token_len-1] = 0;
-    memcpy(state->pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
-    state->token = state->pool->token;
+    evbuffer_copyout_from(buf, &ptr, &pool->token[SPOTIFY_TOKEN_HEADER_PREFIX_LEN], token_len - SPOTIFY_TOKEN_HEADER_PREFIX_LEN - 1);
+    pool->token[token_len-1] = 0;
+    memcpy(pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
 
-    printf("Got token: %s\n", state->pool->token);
-    http_dispatch_request_state(state);
+    printf("Got token: %s\n", pool->token);
+    dispatch_all_queued_requests(pool);
     return;
 
     fail:
     printf("Unable to get token, retrying\n");
-    make_token_request(state);
+    make_token_request(pool);
+}
+
+static int
+dispatch_request_state_on_token(struct http_connection_pool *pool, struct request_state *state) {
+    if (pool->token)
+        return http_dispatch_request_state(state);
+    else
+        make_token_request(pool);
+
+    if (pool->fetching_token)
+        vec_add(&pool->queued_requests, state);
+    return 1;
+}
+
+static int
+dispatch_all_queued_requests(struct http_connection_pool *pool){
+    int ret = (int) pool->queued_requests.len;
+    for (int i = 0; i < pool->queued_requests.len; ++i) {
+        struct request_state *state = (struct request_state*) pool->queued_requests.el[i];
+        state->token = pool->token;
+        http_dispatch_request_state(state);
+    }
+    vec_remove_all(&pool->queued_requests);
+    return ret;
 }
 
 static void
@@ -226,16 +255,16 @@ http_get_no_cache_cb(struct evhttp_request *req, void *arg) {
         state->response_size = strtoll(clens, &end, 10);
         printf("Send expected response size: %zu\n", state->response_size);
         enum error_type no_err = ET_NO_ERROR;
-        evbuffer_add(state->output, &no_err, 1);
-        evbuffer_add(state->output, &state->response_size, sizeof(state->response_size));
+        write(state->out_fd, &no_err, 1);
+        write(state->out_fd, &state->response_size, sizeof(state->response_size));
     }
-    evbuffer_add_buffer(state->output, evhttp_request_get_input_buffer(req));
+    struct evbuffer *b = evhttp_request_get_input_buffer(req);
+    evbuffer_write(b, state->out_fd);
 }
 
 static void
 http_get_cb(struct evhttp_request *req, void *arg) {
     struct request_state *state = (struct request_state *) arg;
-    struct evbuffer *output = state->output;
 
     if (req == NULL || req->response_code != 200) {
         return;
@@ -259,7 +288,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
 
     size_t got = evbuffer_copyout(req_data, &wj->tmp[wj->current_buf][wj->offset+offset], MAX_BYTES_PER_READ - offset);
 
-    evbuffer_add(output, &wj->tmp[wj->current_buf][wj->offset], got + offset);
+    write(state->out_fd, &wj->tmp[wj->current_buf][wj->offset], got + offset);
 
     if(MAX_WRITE_BUFFER_SIZE - (wj->offset + got + offset) < MAX_BYTES_PER_READ * 2) {
         while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
@@ -284,10 +313,10 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
     struct request_state *state = (struct request_state *) arg;
     if (req == NULL) {
         printf("timed out!\n");
-        write_error_evb(state->output, ET_HTTP, "timed out!");
+        write_error(state->out_fd, ET_HTTP, "timed out!");
     } else if (req->response_code == 0) {
         printf("connection refused!\n");
-        write_error_evb(state->output, ET_HTTP, "connection refused!");
+        write_error(state->out_fd, ET_HTTP, "connection refused!");
     } else if (req->response_code == 401) { // Token expired, get new one
 
         if (state->token && state->pool->token && strcmp(state->token, state->pool->token) != 0) {
@@ -297,10 +326,11 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
 
         printf("access token expired, getting new one\n");
 
-        make_token_request(state);
+        vec_add(&state->pool->queued_requests, state);
+        make_token_request(state->pool);
         return;
     } else if (req->response_code != 200) {
-        write_error_evb(state->output, ET_HTTP, req->response_code_line);
+        write_error(state->out_fd, ET_HTTP, req->response_code_line);
     }
     if (state->fp) {
         struct write_job *wj = &state->write_job;
@@ -318,7 +348,7 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
     free(arg);
 }
 
-int
+static int
 http_dispatch_request_state(struct request_state *state) {
     struct evhttp_request *req = evhttp_request_new(http_get_complete_cb, state);
     evhttp_add_header(req->output_headers, "Connection", "keep-alive");
@@ -332,8 +362,8 @@ http_dispatch_request_state(struct request_state *state) {
 }
 
 int
-http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp, SSL *ssl, const char *host, bool api) {
-    struct event_base *base = bufferevent_get_base(bev);
+http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl, const char *host, bool api) {
+    struct event_base *base = pool->base;
 
     struct connection *connection;
     {
@@ -357,7 +387,7 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
     if (!connection->active) {
         printf("Activated new connection\n");
         connection->bev = bufferevent_openssl_socket_new(base, -1, ssl,
-                                                         BUFFEREVENT_SSL_CONNECTING,
+                                                        BUFFEREVENT_SSL_CONNECTING,
                                                          BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
         bufferevent_openssl_set_allow_dirty_shutdown(connection->bev, 1);
 
@@ -369,7 +399,7 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
     }
 
     struct request_state *state = calloc(1, sizeof(*state));
-    state->output = bufferevent_get_output(bev);
+    state->out_fd = fd;
     state->connection = connection;
     state->pool = pool;
     state->api = api;
@@ -380,14 +410,7 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, str
         state->write_job.cb.aio_fildes = fileno(fp);
     }
 
-    struct evhttp_request *req = evhttp_request_new(http_get_complete_cb, state);
-    evhttp_add_header(req->output_headers, "Connection", "keep-alive");
-    evhttp_add_header(req->output_headers, "Host", host);
-    if (pool->token) evhttp_add_header(req->output_headers, "Authorization", pool->token);
-    req->chunk_cb = state->fp ? http_get_cb : http_get_no_cache_cb;
-    req->cb_arg = state;
-
-    evhttp_make_request(connection->connection, req, EVHTTP_REQ_GET, uri_in);
+    dispatch_request_state_on_token(pool, state);
     return 0;
 }
 
@@ -424,4 +447,8 @@ http_cleanup(struct http_connection_pool *pool){
 char *
 urlencode(const char *src, int len) {
     return curl_easy_escape(NULL, src, len);
+}
+
+void http_set_base(struct event_base *base, struct http_connection_pool *pool) {
+    pool->base = base;
 }

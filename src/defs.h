@@ -12,7 +12,7 @@
 
 #define PORT 5394
 #define SESSION_POOL_MAX 50
-#define MAX_BYTES_PER_READ (1024 * 8) // Same amount used internally by librespot-c
+#define MAX_BYTES_PER_READ (1024 * 8 * 2) // Same amount used internally by librespot-c
 #define MAX_WRITE_BUFFER_SIZE (1024 * 1024)
 #define MAX_CREDENTIAL_USES 5
 #define CONNECTION_POOL_MAX 50
@@ -40,9 +40,6 @@ enum error_type {
 };
 
 void
-write_error_evb(struct evbuffer *buf, enum error_type err, const char *msg);
-
-void
-write_error(struct bufferevent *bev, enum error_type err, const char *msg);
+write_error(int fd, enum error_type err, const char *msg);
 
 #endif //SMP_BACKEND_DEFS_H

@@ -13,6 +13,10 @@
 struct credentials *credentials;
 size_t credentials_count;
 size_t credentials_last_index;
+pthread_mutex_t credentials_mutex;
+
+char *available_regions;
+size_t available_region_count;
 
 struct credentials *get_credentials();
 
@@ -22,8 +26,57 @@ audio_read_cb(int fd, short what, void *arg);
 void session_cb(int ret, void *userp);
 
 void
-write_error_spotify(struct bufferevent *bev) {
-    write_error(bev, ET_SPOTIFY_INTERNAL, librespotc_last_errmsg());
+fd_vec_init(struct fd_vec *v){
+    v->size = VEC_INITIAL_SIZE;
+    v->len = 0;
+    v->el = calloc(VEC_INITIAL_SIZE, sizeof(*v->el));
+}
+
+void
+fd_vec_add(struct fd_vec *vec, int fd){
+    if (vec->size <= vec->len + 1) {
+        int *realloc_tmp = realloc(vec->el, (vec->size + VEC_SIZE_STEP) * sizeof(*realloc_tmp));
+        if (!realloc_tmp) perror("error when calling realloc()");
+        vec->el = realloc_tmp;
+        vec->size += VEC_SIZE_STEP;
+    }
+    memcpy(&vec->el[vec->len++], &fd, sizeof(fd));
+}
+
+void
+fd_vec_remove(struct fd_vec *vec, int index){
+    vec->el[index] = -1;
+}
+
+bool
+fd_vec_remove_element(struct fd_vec *vec, int fd){
+    for (int i = 0; i < vec->len; ++i) {
+        if (vec->el[i]==fd){
+            fd_vec_remove(vec, i);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
+fd_vec_is_empty(struct fd_vec *vec){
+    if (vec->len == 0) return true;
+    for (int i = 0; i < vec->len; ++i) {
+        if (vec->el[i] != -1) return false;
+    }
+    return true;
+}
+
+void
+fd_vec_free(struct fd_vec *v){
+    free(v->el);
+    memset(v, 0, sizeof(*v));
+}
+
+void
+write_error_spotify(int fd) {
+    write_error(fd, ET_SPOTIFY_INTERNAL, librespotc_last_errmsg());
 }
 
 void
@@ -32,7 +85,7 @@ clean_element(struct element *element) {
     if (element->active && element->session) {
         librespotc_close(element->session);
     }
-    vec_free(&element->bev_vec);
+    fd_vec_free(&element->fd_vec);
     if (element->read_ev) event_free(element->read_ev);
     if (element->cache_fp) fclose(element->cache_fp);
     free(element->path);
@@ -47,8 +100,8 @@ session_error(
     struct element *element = (struct element *) userp;
     if (element->retries >= 3){
         fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.\n");
-        for (int i = 0; i < element->bev_vec.len; ++i) {
-            write_error(element->bev_vec.el[i], ET_SPOTIFY_INTERNAL, "Failed after 3 retries, disconnecting");
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            write_error(element->fd_vec.el[i], ET_SPOTIFY_INTERNAL, "Failed after 3 retries, disconnecting");
         }
         clean_element(element);
         return;
@@ -76,12 +129,12 @@ session_error(
     if (creds->creds.stored_cred_len == 0) {
         librespotc_login_password(creds->creds.username,
                                   creds->creds.password, &element->session, session_cb,
-                                  element);
+                                  element, element->base);
     } else {
         librespotc_login_stored_cred(creds->creds.username,
                                      creds->creds.stored_cred,
                                      creds->creds.stored_cred_len, &element->session, session_cb,
-                                     element);
+                                     element, element->base);
     }
     if (!element->session) {
         fprintf(stderr, "Error creating librespot session: %s\n", librespotc_last_errmsg());
@@ -92,11 +145,15 @@ session_error(
 
 struct credentials *
 get_credentials() {
+    pthread_mutex_lock(&credentials_mutex);
     for (int i = 0; i < credentials_count; ++i) {
         if (++credentials_last_index >= credentials_count) credentials_last_index = 0;
-        if (credentials[credentials_last_index].uses <= MAX_CREDENTIAL_USES)
+        if (credentials[credentials_last_index].uses <= MAX_CREDENTIAL_USES){
+            pthread_mutex_unlock(&credentials_mutex);
             return &credentials[credentials_last_index];
+        }
     }
+    pthread_mutex_unlock(&credentials_mutex);
     return NULL;
 }
 
@@ -121,9 +178,10 @@ finish_seek_cb(int ret, void *userp) {
     }
     if (!element->progress){
         enum error_type no_err = ET_NO_ERROR;
-        for (int i = 0; i < element->bev_vec.len; ++i) {
-            bufferevent_write(element->bev_vec.el[i], &no_err, 1);
-            bufferevent_write(element->bev_vec.el[i], &element->file_len, sizeof(element->file_len));
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            if (element->fd_vec.el[i] == -1) continue;
+            write(element->fd_vec.el[i], &no_err, 1);
+            write(element->fd_vec.el[i], &element->file_len, sizeof(element->file_len));
         }
         if (element->cache_fp){
             fwrite(&no_err, 1, 1, element->cache_fp);
@@ -147,8 +205,8 @@ spotify_file_open_cb(int fd, void *userp) {
     struct element *element = (struct element *) userp;
 
     if (fd < 0) {
-        for (int i = 0; i < element->bev_vec.len; ++i) {
-            write_error_spotify(element->bev_vec.el[i]);
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            write_error_spotify(element->fd_vec.el[i]);
         }
         if (element->cache_fp) fclose(element->cache_fp);
         element->cache_fp = NULL;
@@ -172,8 +230,8 @@ session_cb(int ret, void *userp) {
 
     if (!element->session) {
         fprintf(stderr, "Error creating librespot session: %s\n", librespotc_last_errmsg());
-        for (int i = 0; i < element->bev_vec.len; ++i) {
-            write_error_spotify(element->bev_vec.el[i]);
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            write_error_spotify(element->fd_vec.el[i]);
         }
         fclose(element->cache_fp);
         remove(element->path);
@@ -181,13 +239,12 @@ session_cb(int ret, void *userp) {
     }
     char *region = librespotc_get_country(element->session);
     printf("Created spotify session (%d). Region: %.2s\n", ret, region);
-    librespotc_session_error_cb(element->session, session_error, element);
 
     if (region[0] != element->creds->region[0] || region[1] != element->creds->region[1]){ // Correct region in case it's wrong
         printf("Region mismatch found for account '%s'. Correcting from %.2s to %.2s\n", element->creds->creds.username, element->creds->region, region);
         element->creds->region[0] = region[0];
         element->creds->region[1] = region[1];
-        spotify_update_available_regions(element->parent);
+        spotify_update_available_regions();
     }
 
     int r = librespotc_open(element->id, element->session, spotify_file_open_cb, userp);
@@ -197,21 +254,23 @@ session_cb(int ret, void *userp) {
 }
 
 struct element *
-spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id, char *path, struct bufferevent *bev,
-                         char *region) {
+spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd,
+                         const char *region, audio_finished_cb cb, void *cb_arg,
+                         struct event_base *base) {
 
     int uninit = -1;
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
         if (!pool->elements[i].active && (!region || (region[0] == pool->elements[i].creds->region[0] && region[1] == pool->elements[i].creds->region[1]))) {
             if (pool->elements[i].session) {
                 pool->elements[i].active = true;
-                pool->elements[i].parent = pool;
                 pool->elements[i].progress = progress;
                 memcpy(pool->elements[i].id, id, sizeof(pool->elements[i].id));
                 pool->elements[i].path = strdup(path);
-                vec_init(&pool->elements[i].bev_vec);
-                vec_add(&pool->elements[i].bev_vec, bev);
+                fd_vec_init(&pool->elements[i].fd_vec);
+                fd_vec_add(&pool->elements[i].fd_vec, fd);
                 pool->elements[i].cache_fp = fopen(pool->elements[i].path, "a");
+                pool->elements[i].cb = cb;
+                pool->elements[i].cb_arg = cb_arg;
                 session_cb(0, &pool->elements[i]);
                 return &pool->elements[i]; // Not active and a valid session
             }
@@ -223,13 +282,14 @@ spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id
         struct credentials *creds = get_credentials();
         printf("Creating new session as %s\n", creds->creds.username);
         pool->elements[uninit].progress = progress;
-        vec_init(&pool->elements[uninit].bev_vec);
-        vec_add(&pool->elements[uninit].bev_vec, bev);
+        fd_vec_init(&pool->elements[uninit].fd_vec);
+        fd_vec_add(&pool->elements[uninit].fd_vec, fd);
         pool->elements[uninit].path = strdup(path);
-        pool->elements[uninit].base = bufferevent_get_base(bev);
+        pool->elements[uninit].base = base;
         pool->elements[uninit].read_ev = NULL;
         pool->elements[uninit].active = true;
-        pool->elements[uninit].parent = pool;
+        pool->elements[uninit].cb = cb;
+        pool->elements[uninit].cb_arg = cb_arg;
         pool->elements[uninit].cache_fp = fopen(pool->elements[uninit].path, "a");
         if (!pool->elements[uninit].cache_fp){
             fprintf(stderr, "Error occurred while trying to open file '%s': %s\n", pool->elements[uninit].path,
@@ -240,17 +300,42 @@ spotify_activate_session(struct session_pool *pool, size_t progress, uint8_t *id
         if (creds->creds.stored_cred_len == 0) {
             librespotc_login_password(creds->creds.username,
                                       creds->creds.password, &pool->elements[uninit].session, session_cb,
-                                      &pool->elements[uninit]);
+                                      &pool->elements[uninit], pool->elements[uninit].base);
         } else {
             librespotc_login_stored_cred(creds->creds.username,
                                          creds->creds.stored_cred,
                                          creds->creds.stored_cred_len, &pool->elements[uninit].session, session_cb,
-                                         &pool->elements[uninit]);
+                                         &pool->elements[uninit], pool->elements[uninit].base);
         }
+        librespotc_session_error_cb(pool->elements[uninit].session, session_error, &pool->elements[uninit]);
         creds->uses++;
         return &pool->elements[uninit];
     }
     return NULL;
+}
+
+void spotify_stop_element(struct element *element) {
+    if (!element) return;
+    if (element->read_ev) event_free(element->read_ev);
+    element->read_ev = NULL;
+    if (element->session) librespotc_close(element->session);
+    if (element->cache_fp){
+        struct write_job *wj = &element->write_job;
+        while (aio_error(&wj->cb) == EINPROGRESS) {}
+        if (wj->offset){
+            wj->cb.aio_buf = wj->tmp[wj->current_buf];
+            wj->cb.aio_nbytes = wj->offset;
+            aio_write(&wj->cb);
+            while (aio_error(&wj->cb) == EINPROGRESS) {}
+        }
+        fclose(element->cache_fp);
+        element->cache_fp = NULL;
+    }
+    if (element->cb) element->cb(element, element->cb_arg);
+
+    clean_element(element);
+    element->active = false;
+    element->progress = 0;
 }
 
 static void
@@ -262,7 +347,25 @@ audio_read_cb(int fd, short what, void *arg) {
 
     got = read(fd, &wj->tmp[wj->current_buf][wj->offset], MAX_BYTES_PER_READ);
 
-    if (got <= 0) {
+    element->progress += got;
+    if (got > 0){
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            if(element->fd_vec.el[i] != -1) write(element->fd_vec.el[i], &wj->tmp[wj->current_buf][wj->offset], got);
+        }
+        if (element->cache_fp){
+            if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
+                while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
+                wj->cb.aio_buf = wj->tmp[wj->current_buf];
+                wj->cb.aio_nbytes = wj->offset + got;
+                aio_write(&wj->cb);
+                wj->offset = 0;
+                wj->current_buf = !wj->current_buf;
+            }else{
+                wj->offset += got;
+            }
+        }
+    }
+    if (got <= 0 || element->progress >= element->file_len) {
         printf("Playback ended (%zu)\n", got);
         event_free(element->read_ev);
         element->read_ev = NULL;
@@ -278,33 +381,17 @@ audio_read_cb(int fd, short what, void *arg) {
             fclose(element->cache_fp);
             element->cache_fp = NULL;
         }
+        if (element->cb) element->cb(element, element->cb_arg);
 
-        vec_free(&element->bev_vec);
+        clean_element(element);
         element->active = false;
         element->progress = 0;
-        return;
-    }
-    element->progress += got;
-
-    for (int i = 0; i < element->bev_vec.len; ++i) {
-        bufferevent_write(element->bev_vec.el[i], &wj->tmp[wj->current_buf][wj->offset], got);
-    }
-    if (element->cache_fp){
-        if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
-            while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
-            wj->cb.aio_buf = wj->tmp[wj->current_buf];
-            wj->cb.aio_nbytes = wj->offset + got;
-            aio_write(&wj->cb);
-            wj->offset = 0;
-            wj->current_buf = !wj->current_buf;
-        }else{
-            wj->offset += got;
-        }
     }
 }
 
 int
-spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
+spotify_init(int argc, char **argv) {
+    credentials_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
     if (argc == 2) { // Load credentials from file
         FILE *fp = fopen(argv[1], "r"); // File format is: <email> <password> <username> <region>\n
         fseek(fp, 0L, SEEK_END);
@@ -372,58 +459,59 @@ spotify_init(int argc, char **argv, struct session_pool *pool, int fd) {
             memcpy(credentials[i].region, argv1[i * 3 + 2], region_len > 2 ? 2 : region_len);
         }
     }
-    spotify_update_available_regions(pool);
-    printf("Available regions (%d): ", pool->available_region_count);
-    for (int i = 0; i < pool->available_region_count; ++i) {
-        putc(pool->available_regions[i*2], stdout);
-        putc(pool->available_regions[i*2+1], stdout);
-        if (i==pool->available_region_count-1){
+    spotify_update_available_regions();
+    printf("Available regions (%zu): ", available_region_count);
+    for (int i = 0; i < available_region_count; ++i) {
+        putc(available_regions[i*2], stdout);
+        putc(available_regions[i*2+1], stdout);
+        if (i==available_region_count-1){
             putc('\n', stdout);
         }else{
             putc(' ', stdout);
         }
     }
-    memset(pool->elements, 0, sizeof(pool->elements));
 
     memset(&s_sysinfo, 0, sizeof(struct sp_sysinfo));
     snprintf(s_sysinfo.device_id, sizeof(s_sysinfo.device_id), "aabbccddeeff");
 
-    int ret = librespotc_init(&s_sysinfo, &callbacks, fd);
+    int ret = librespotc_init(&s_sysinfo, &callbacks);
     if (ret < 0) {
         printf("Error initializing Spotify: %s\n", librespotc_last_errmsg());
         return -1;
     }
+    return 0;
 }
 
 void
-spotify_update_available_regions(struct session_pool *pool) {
-    if (pool->available_regions){
-        free(pool->available_regions);
-        pool->available_regions = NULL;
+spotify_update_available_regions() { // TODO: Make this thread safe
+    if (available_regions){
+        free(available_regions);
+        available_regions = NULL;
     }
-    pool->available_region_count = 0;
-    pool->available_regions = calloc(credentials_count, sizeof(*pool->available_regions) * 2);
+    available_region_count = 0;
+    available_regions = calloc(credentials_count, sizeof(*available_regions) * 2);
     for (int i = 0; i < credentials_count; ++i) {
         // Check if region already included
-        char *r = memchr(pool->available_regions, credentials[i].region[0], pool->available_region_count * 2 * sizeof(sizeof(*pool->available_regions)));
+        char *r = memchr(available_regions, credentials[i].region[0], available_region_count * 2 * sizeof(sizeof(*available_regions)));
         if (r && r[1] == credentials[i].region[1]) continue; // Already included
 
-        pool->available_regions[pool->available_region_count*2] = credentials[i].region[0];
-        pool->available_regions[pool->available_region_count*2+1] = credentials[i].region[1];
-        pool->available_region_count++;
+        available_regions[available_region_count*2] = credentials[i].region[0];
+        available_regions[available_region_count*2+1] = credentials[i].region[1];
+        available_region_count++;
     }
-    if (pool->available_region_count != credentials_count){ // realloc to exact size
-        char *tmp = realloc(pool->available_regions, pool->available_region_count * sizeof(*pool->available_regions) * 2);
+    if (available_region_count != credentials_count){ // realloc to exact size
+        char *tmp = realloc(available_regions, available_region_count * sizeof(*available_regions) * 2);
         if (!tmp) perror("error calling realloc");
-        pool->available_regions = tmp;
+        available_regions = tmp;
     }
 }
 
 void
-spotify_clean(struct session_pool *pool){
+spotify_clean(struct session_pool *pool) {
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
         clean_element(&pool->elements[i]);
     }
     free(credentials);
+    pthread_mutex_destroy(&credentials_mutex);
     librespotc_deinit();
 }

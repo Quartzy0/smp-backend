@@ -5,7 +5,7 @@
 #ifndef SMP_BACKEND_VEC_H
 #define SMP_BACKEND_VEC_H
 
-#include <pthread.h>
+//#include <pthread.h>
 
 #ifndef VEC_INITIAL_SIZE
 #define VEC_INITIAL_SIZE 50
@@ -16,7 +16,7 @@
 
 struct vec {
     void **el;
-    pthread_mutex_t mutex;
+//    pthread_mutex_t mutex;
     size_t len;
     size_t size;
 };
@@ -37,6 +37,34 @@ int
 vec_remove_element(struct vec *vec, void *el);
 
 int
+vec_remove_all(struct vec *vec);
+
+int
 vec_free(struct vec *vec);
+
+struct vec_direct {
+    void *el;
+    size_t el_size;
+    size_t len;
+    size_t size;
+};
+
+/*int
+vec_direct_init(struct vec_direct *vec, size_t el_size);
+
+int
+vec_direct_init_with_size(struct vec_direct *vec, size_t el_size, size_t initial);
+
+int
+vec_direct_add(struct vec_direct *vec, void *el);
+
+int
+vec_direct_remove_index(struct vec_direct *vec, size_t index);
+
+int
+vec_direct_remove_element(struct vec_direct *vec, void *el);
+
+int
+vec_direct_free(struct vec_direct *vec);*/
 
 #endif //SMP_BACKEND_VEC_H

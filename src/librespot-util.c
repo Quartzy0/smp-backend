@@ -68,60 +68,6 @@ https_get(char **body, const char *url) {
     return -1;
 }
 
-int
-tcp_connect(const char *address, unsigned short port) {
-    struct addrinfo hints = {0};
-    struct addrinfo *servinfo;
-    struct addrinfo *ptr;
-    char strport[8];
-    int fd;
-    int ret;
-
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_family = AF_UNSPEC;
-
-    snprintf(strport, sizeof(strport), "%hu", port);
-    ret = getaddrinfo(address, strport, &hints, &servinfo);
-    if (ret < 0) {
-        printf("Could not connect to %s (port %u): %s\n", address, port, gai_strerror(ret));
-        return -1;
-    }
-
-    for (ptr = servinfo; ptr; ptr = ptr->ai_next) {
-        fd = socket(ptr->ai_family, SOCK_STREAM, ptr->ai_protocol);
-        if (fd < 0) {
-            continue;
-        }
-
-        ret = connect(fd, ptr->ai_addr, ptr->ai_addrlen);
-        if (ret != 0 && ret != EINPROGRESS && errno != EINPROGRESS) {
-            close(fd);
-            continue;
-        }
-
-        break;
-    }
-
-    freeaddrinfo(servinfo);
-
-    if (!ptr) {
-        printf("Could not connect to '%s' (port %u): %s\n", address, port, strerror(errno));
-        return -1;
-    }
-
-    printf("Connected to %s (port %u)\n", address, port);
-
-    return fd;
-}
-
-void
-tcp_disconnect(int fd) {
-    if (fd < 0)
-        return;
-
-    close(fd);
-}
-
 void
 logmsgf(const char *fmt, ...){
     printf("");
@@ -134,10 +80,6 @@ logmsgf(const char *fmt, ...){
 struct sp_callbacks callbacks =
         {
                 .https_get = https_get,
-                .tcp_connect = tcp_connect,
-                .tcp_disconnect = tcp_disconnect,
-
-                .thread_name_set = NULL,
 
                 .hexdump  = hexdump_dummy,
                 .logmsg   = logmsgf,

@@ -6,10 +6,13 @@
 #include <pthread.h>
 #include <event2/event.h>
 #include "../../src/cmd.h"
+#include <stdbool.h>
 
 #define LIBRESPOT_C_VERSION_MAJOR 0
 #define LIBRESPOT_C_VERSION_MINOR 1
 
+#define SP_CHUNK_LEN_WORDS (1024 * 8)
+#define SP_CHUNK_LEN_BYTES (SP_CHUNK_LEN_WORDS*2)
 
 struct sp_session;
 
@@ -51,10 +54,6 @@ struct sp_credentials {
     size_t token_len;
 };
 
-struct sp_metadata {
-    size_t file_len;
-};
-
 struct sp_sysinfo {
     char client_name[16];
     char client_version[16];
@@ -66,29 +65,23 @@ struct sp_callbacks {
     // Bring your own https client and tcp connector
     int (*https_get)(char **body, const char *url);
 
-    int (*tcp_connect)(const char *address, unsigned short port);
-
-    void (*tcp_disconnect)(int fd);
-
-    // Optional - set name of thread
-    void (*thread_name_set)(pthread_t thread);
-
     // Debugging
     void (*hexdump)(const char *msg, uint8_t *data, size_t data_len);
 
     void (*logmsg)(const char *fmt, ...);
 };
 
-void
+int
 librespotc_login_password(const char *username, const char *password, struct sp_session **session, cmd_callback cmd_cb,
-                          void *cb_arg);
+                          void *cb_arg, struct event_base *evbase);
+
+int
+librespotc_login_stored_cred(const char *username, const char *stored_cred, size_t stored_cred_len,
+                             struct sp_session **session, cmd_callback cmd_cb, void *cb_arg,
+                             struct event_base *evbase);
 
 void
-librespotc_login_stored_cred(const char *username, uint8_t *stored_cred, size_t stored_cred_len,
-                             struct sp_session **session, cmd_callback cmd_cb, void *cb_arg);
-
-void
-librespotc_login_token(const char *username, const char *token, struct sp_session **session);
+librespotc_login_token(const char *username, const char *token, struct sp_session **session, struct event_base *evbase);
 
 int
 librespotc_logout(struct sp_session *session);
@@ -108,7 +101,7 @@ librespotc_open(const char *path, struct sp_session *session, cmd_callback cmd_c
 // Continues writing data to the file descriptor until error or end of track.
 // A read of the fd that returns 0 means end of track, and a negative read
 // return value means error. progress_cb and cb_arg optional.
-void
+int
 librespotc_write(struct sp_session *session);
 
 // Seeks to pos (measured in bytes, so must not exceed file_len), flushes old
@@ -127,7 +120,7 @@ const char *
 librespotc_last_errmsg(void);
 
 int
-librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks, int fd);
+librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks);
 
 void
 librespotc_deinit(void);

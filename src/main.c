@@ -4,150 +4,50 @@
 #include <event2/listener.h>
 #include <event2/bufferevent.h>
 #include <event2/buffer.h>
-#include <stdbool.h>
+#include <event2/http.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <event2/thread.h>
-#include <event2/http.h>
-#include "cmd.h"
-#include "vec.h"
-#include <ctype.h>
-#include <sys/stat.h>
-#include "http.h"
 #include "defs.h"
 #include "spotify.h"
+#include "util.h"
+#include "config.h"
+#include "worker.h"
 
-size_t client_count;
-int cmds[2];
-
-typedef enum PacketType {
-    MUSIC_DATA = 0,
-    MUSIC_INFO = 1,
-    PLAYLIST_INFO = 2,
-    ALBUM_INFO = 3,
-    RECOMMENDATIONS = 4,
-    ARTIST_INFO = 5,
-    SEARCH = 6,
-    AVAILABLE_REGIONS = 7,
-} PacketType;
-
-struct pools {
-    struct session_pool session_pool;
-    struct http_connection_pool http_connection_pool;
+struct worker_pool{
+    struct worker *workers;
+    size_t worker_count;
 };
 
-bool
-is_valid_id(uint8_t *id) {
-    if (!id) return false;
-    if (memchr(id, '\0', 22)) return false; // If string is shorter than the minimum length
-    for (int i = 0; i < 22; ++i) {
-        if (!isalnum(id[i])) return false;
-    }
-    return true;
-}
+struct worker_callback_container{
+    struct worker_pool *pool;
+    struct worker *worker;
+};
 
 void
-write_error_evb(struct evbuffer *buf, enum error_type err, const char *msg) {
+write_error(int fd, enum error_type err, const char *msg) {
+    if (fd == -1) return;
     char data[1 + sizeof(size_t)];
     data[0] = err;
 
     if (msg) {
         size_t len = strlen(msg);
         memcpy(&data[1], &len, sizeof(len));
-        evbuffer_add(buf, data, sizeof(data));
-        evbuffer_add(buf, msg, len * sizeof(*msg));
+        write(fd, data, sizeof(data));
+        write(fd, msg, len * sizeof(*msg));
     } else {
         memset(&data[1], 0, sizeof(size_t));
-        evbuffer_add(buf, data, sizeof(data));
+        write(fd, data, sizeof(data));
     }
-}
-
-void
-write_error(struct bufferevent *bev, enum error_type err, const char *msg) {
-    char data[1 + sizeof(size_t)];
-    data[0] = err;
-
-    if (msg) {
-        size_t len = strlen(msg);
-        memcpy(&data[1], &len, sizeof(len));
-        bufferevent_write(bev, data, sizeof(data));
-        bufferevent_write(bev, msg, len * sizeof(*msg));
-    } else {
-        memset(&data[1], 0, sizeof(size_t));
-        bufferevent_write(bev, data, sizeof(data));
-    }
-}
-
-void
-http_generic_request(uint8_t *in, struct bufferevent *bev, struct http_connection_pool *http_connection_pool,
-                     const char *uri_in, const char *path_in, bool api, bool insert_id_url) {
-    struct evbuffer *input = bufferevent_get_input(bev);
-
-    uint8_t *id = &in[1];
-    if (!is_valid_id(id)) {
-        write_error(bev, ET_SPOTIFY, "Invalid track id");
-        evbuffer_drain(input, 23);
-        return;
-    }
-
-    const char *uri;
-    if (insert_id_url) {
-        size_t uri_in_len = strlen(uri_in);
-        uri = calloc(22 + uri_in_len + 1, sizeof(*uri));
-        memcpy(uri, uri_in, uri_in_len);
-        memcpy(&uri[uri_in_len], id, 22);
-    } else {
-        uri = uri_in;
-    }
-
-    size_t path_in_len = strlen(path_in);
-    char *path = calloc(22 + path_in_len + 1, sizeof(*path));
-    memcpy(path, path_in, path_in_len);
-    memcpy(&path[path_in_len], id, 22);
-
-    if (!access(path, R_OK)) {
-        FILE *fp = fopen(path, "r");
-        size_t read_size = 0;
-        fread(&read_size, sizeof(read_size), 1, fp);
-
-        fseek(fp, 0L, SEEK_END);
-        int64_t len = ftell(fp);
-        rewind(fp);
-
-        if (len - sizeof(read_size) == read_size) {
-            evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0L, len);
-        } else {
-            if (api) {
-                http_dispatch_request_api(http_connection_pool, uri, bev,
-                                          NULL);
-            } else {
-                http_dispatch_request_partner(http_connection_pool, uri, bev,
-                                              NULL);
-            }
-            // Cache is still being written, make the request without writing to the cache.
-        }                                   // Since the API requests are very small in comparison to downloading songs, an
-        evbuffer_drain(input, 23);// extra request isn't a big deal.
-        return;
-    }
-    FILE *fp = fopen(path, "a");
-
-    if (api) {
-        http_dispatch_request_api(http_connection_pool, uri, bev, fp);
-    } else {
-        http_dispatch_request_partner(http_connection_pool, uri, bev, fp);
-    }
-    evbuffer_drain(input, 23);
 }
 
 static void
-client_read_cb(struct bufferevent *bev, void *ctx) {
-    struct pools *pool = (struct pools *) ctx;
-    struct session_pool *session_pool = &pool->session_pool;
-    struct http_connection_pool *http_connection_pool = &pool->http_connection_pool;
-    /* This callback is invoked when there is data to read on bev. */
-    struct evbuffer *input = bufferevent_get_input(bev);
-    struct evbuffer *output = bufferevent_get_output(bev);
+client_read_cb(struct bufferevent *bev, void *ctx){
+    struct worker_callback_container *container = (struct worker_callback_container*)ctx;
+    struct worker_pool *worker_pool = container->pool;
+    int fd = bufferevent_getfd(bev);
 
+    struct evbuffer *input = bufferevent_get_input(bev);
     size_t in_len = evbuffer_get_length(input);
     if (in_len < 1) return; // Wait for more data
     uint8_t *in = evbuffer_pullup(input, -1);
@@ -157,135 +57,40 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             uint8_t *id = &in[1];
             if (!is_valid_id(id)) {
                 printf("Invalid track id: %.22s\n", id);
-                write_error(bev, ET_SPOTIFY, "Invalid track id");
+                write_error(fd, ET_SPOTIFY, "Invalid track id");
                 evbuffer_drain(input, 25);
                 return;
             }
             printf("Track requested: %.22s\n", id);
 
-            char path[35] = "music_cache/";
-            memcpy(&path[12], id, 22);
-            path[34] = 0;
+            struct worker_hash_table_element *worker = hash_table_put_if_not_get(&worker_id_table, id, worker_find_least_busy(worker_pool->workers, worker_pool->worker_count));
+            struct worker_request req = {0};
+            req.type = MUSIC_DATA;
+            req.client_fd = fd;
+            memcpy(req.regioned_id.id, id, sizeof(req.regioned_id.id));
+            memcpy(req.regioned_id.region, &in[23], sizeof(req.regioned_id.region));
+            worker_send_request(worker->worker, &req);
+            container->worker = worker->worker;
 
-            size_t progress = 0;
-            if (!access(path, R_OK)) {
-                FILE *fp = fopen(path, "r");
-                size_t file_len;
-                char tmp_data[1 + sizeof(file_len)];
-                size_t bytes_read = fread(tmp_data, sizeof(tmp_data), 1, fp);
-                file_len = *((size_t *) &tmp_data[1]); // Skip first byte
-                fseek(fp, 0L, SEEK_END);
-                size_t actual_len = ftell(fp);
-                rewind(fp);
-
-                int fd = fileno(fp);
-                evbuffer_add_file(output, fd, 0, -1); // Closes fd when done
-                if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // File is fully written
-                    struct element *element = NULL;
-                    for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-                        if (!memcmp(session_pool->elements[i].id, id, sizeof(session_pool->elements[i].id))) {
-                            element = &session_pool->elements[i];
-                            break;
-                        }
-                    }
-                    if (element) {
-                        vec_add(&element->bev_vec, bev);
-                        printf("Sending data for '%.22s' from cache while reading\n", id);
-                        evbuffer_drain(input, 25);
-                        return;
-                    } else {
-                        progress = actual_len - sizeof(tmp_data);
-                    }
-                } else {
-                    printf("Sending data for '%.22s' from cache\n", id);
-                    evbuffer_drain(input, 25);
-                    return;
-                }
-            }
-
-            char *region = &in[23];
-            if (!region[0] && !region[1]) region = NULL;
-            spotify_activate_session(session_pool, progress, id, path, bev, region);
             evbuffer_drain(input, 25);
             return;
         }
+        case PLAYLIST_INFO:
+        case ALBUM_INFO:
+        case ARTIST_INFO:
         case MUSIC_INFO: {
-            if (in_len < 23) return; // Wait for more data
-            http_generic_request(in, bev, http_connection_pool, "/v1/tracks/", "music_info/", true, true);
-            return;
-        }
-        case PLAYLIST_INFO: {
-            if (in_len < 23) return; // Wait for more data
-            http_generic_request(in, bev, http_connection_pool, "/v1/playlists/", "playlist_info/", true, true);
-            return;
-        }
-        case ALBUM_INFO: {
-            if (in_len < 23) return; // Wait for more data
-            http_generic_request(in, bev, http_connection_pool, "/v1/albums/", "album_info/", true, true);
-            return;
-        }
-        case RECOMMENDATIONS: {
-            if (in_len < 25) return;
-            uint8_t *n = &in[1];// 0: number of seed tracks, 1: number of seed artists TODO: Support seed genres
-            size_t sum = n[0] + n[1];
-            size_t expected_len = sum * 22;
-            if (sum > 5) { // There can be a maximum of 5 seed tracks, artists and genres in total
-                write_error(bev, ET_SPOTIFY, "Maximum of 5 seed tracks, artists in total are allowed");
-                evbuffer_drain(input, 3 + expected_len);
-                return;
-            } else if (sum < 1) {
-                write_error(bev, ET_SPOTIFY, "At least 1 seed track, artist must be provided");
-                evbuffer_drain(input, 3 + expected_len);
+            uint8_t *id = &in[1];
+            if (!is_valid_id(id)) {
+                write_error(fd, ET_SPOTIFY, "Invalid track id");
+                evbuffer_drain(input, 23);
                 return;
             }
-            if (in_len < 3 + expected_len) return; // Not enough data
-            //&limit=10
-            size_t uri_len = (n[0] != 0) * (13 + n[0] * 22 + (n[0] - 1)) +
-                             (n[1] != 0) * (14 + n[1] * 22 + (n[1] - 1)) +
-                             19 + 9 + 1;
-            char uri[uri_len];
-            char *uri_b = uri;
-            uint8_t *ids = &in[3];
-            memcpy(uri_b, "/v1/recommendations?", 20);
-            uri_b += 20;
-            if (n[0] != 0) {
-                memcpy(uri_b, "seed_tracks=", 12);
-                uri_b += 12;
-                for (int i = 0; i < n[0]; ++i) {
-                    if (i != 0) {
-                        *(uri_b++) = ',';
-                    }
-                    memcpy(uri_b, ids, 22);
-                    ids += 22;
-                    uri_b += 22;
-                }
-            }
-            if (n[1] != 0) {
-                if (n[0] != 0) {
-                    *(uri_b++) = '&';
-                }
-                memcpy(uri_b, "seed_artists=", 13);
-                uri_b += 13;
-                for (int i = 0; i < n[1]; ++i) {
-                    if (i != 0) {
-                        *(uri_b++) = ',';
-                    }
-                    memcpy(uri_b, ids, 22);
-                    ids += 22;
-                    uri_b += 22;
-                }
-            }
-            memcpy(uri_b, "&limit=30", 9);
-            uri[uri_len - 1] = 0;
-            printf("Performing request using uri: %s\n", uri);
-            http_dispatch_request_api(http_connection_pool, uri, bev, NULL);
-            evbuffer_drain(input, expected_len + 3);
-            return;
-        }
-        case ARTIST_INFO: {
-            if (in_len < 23) return; // Wait for more data
-            // TODO: Not yet implemented but will let us get artist's radio & mix
-            http_generic_request(in, bev, http_connection_pool, "/v1/albums/", "artist_info/", false, false);
+            struct worker_request req = {0};
+            req.type = in[0];
+            req.client_fd = fd;
+            memcpy(req.generic_id, id, sizeof(req.generic_id));
+            worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
+            evbuffer_drain(input, 23);
             return;
         }
         case SEARCH: {
@@ -294,44 +99,49 @@ client_read_cb(struct bufferevent *bev, void *ctx) {
             uint16_t q_len = *((uint16_t *) &in[2]);
             if (in_len < 2 + sizeof(uint16_t) + q_len) return;
 
-            char *q_enc = urlencode(&in[2 + sizeof(uint16_t)], q_len);
-            // /v1/search?type=&q=
-            size_t uri_len = 19 + (flags & 1) * 5 + (flags & 2) * 7 + (flags & 4) * 6 + (flags & 8) * 9 + strlen(q_enc);
-            char *uri = calloc(uri_len, sizeof(*uri));
-            strcat(uri, "/v1/search?type=");
-            if (flags & 1){
-                strcat(uri, "track");
-            }
-            if (flags & 2){
-                if (flags & 1) strcat(uri, ",artist");
-                else strcat(uri, "artist");
-            }
-            if (flags & 4){
-                if (flags & 3) strcat(uri, ",album");
-                else strcat(uri, "album");
-            }
-            if (flags & 8){
-                if (flags & 7) strcat(uri, ",playlist");
-                else strcat(uri, "playlist");
-            }
-            strcat(uri, "&q=");
-            strcat(uri, q_enc);
-            free(q_enc);
-
-            printf("url: %s\n", uri);
-
-            http_dispatch_request_api(http_connection_pool, uri, bev, NULL);
+            struct worker_request req = {0};
+            req.type = SEARCH;
+            req.client_fd = fd;
+            req.search_query.flags = flags;
+            req.search_query.generic_query = urlencode(&in[2 + sizeof(uint16_t)], q_len);
+            worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
             evbuffer_drain(input, 2 + sizeof(uint16_t) + q_len);
-            free(uri);
             return;
         }
         case AVAILABLE_REGIONS: {
-            char resp[sizeof(pool->session_pool.available_region_count) + 1];
+            char resp[sizeof(available_region_count) + 1];
             resp[0] = ET_NO_ERROR;
-            *((size_t*) &resp[1]) = pool->session_pool.available_region_count * 2;
-            evbuffer_add(output, &resp, sizeof(resp));
-            evbuffer_add(output, pool->session_pool.available_regions, pool->session_pool.available_region_count*2);
+            *((size_t *) &resp[1]) = available_region_count * 2;
+            write(fd, &resp, sizeof(resp));
+            write(fd, available_regions, available_region_count*2);
             evbuffer_drain(input, 1);
+            return;
+        }
+        case RECOMMENDATIONS: {
+            if (in_len < 25) return;
+            uint8_t *n = &in[1];// 0: number of seed tracks, 1: number of seed artists TODO: Support seed genres
+            size_t sum = n[0] + n[1];
+            size_t expected_len = sum * 22;
+            if (sum > 5) { // There can be a maximum of 5 seed tracks, artists and genres in total
+                write_error(fd, ET_SPOTIFY, "Maximum of 5 seed tracks, artists in total are allowed");
+                evbuffer_drain(input, 3 + expected_len);
+                return;
+            } else if (sum < 1) {
+                write_error(fd, ET_SPOTIFY, "At least 1 seed track, artist must be provided");
+                evbuffer_drain(input, 3 + expected_len);
+                return;
+            }
+            if (in_len < 3 + expected_len) return; // Not enough data
+
+            struct worker_request req = {0};
+            req.type = RECOMMENDATIONS;
+            req.client_fd = fd;
+            req.recommendation_seed.t = n[0];
+            req.recommendation_seed.a = n[1];
+            memcpy(&req.recommendation_seed.ids[0][0], &n[2], expected_len);
+            worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
+            evbuffer_drain(input, expected_len + 3);
+            return;
         }
         default:
             evbuffer_drain(input, 1); //Invalid data
@@ -343,27 +153,36 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
     if (events & BEV_EVENT_ERROR)
         perror("Error from bufferevent");
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
-        struct session_pool *pool = (struct session_pool *) ctx;
-        for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-            if (!vec_remove_element(&pool->elements[i].bev_vec, bev)) break;
+        struct worker_callback_container *container = (struct worker_callback_container*) ctx;
+        if (container->worker){
+            struct worker_request req = {0};
+            req.type = DISCONNECTED;
+            req.client_fd = bufferevent_getfd(bev);
+            worker_send_request(container->worker, &req);
         }
         bufferevent_free(bev);
-        printf("Client disconnected (%zu)\n", --client_count);
+        printf("Client disconnected\n");
     }
 }
 
 void
 accept_connection_cb(struct evconnlistener *listener, evutil_socket_t fd, struct sockaddr *addr, int socklen,
                      void *userp) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (!(flags & O_NONBLOCK)) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
     /* We got a new connection! Set up a bufferevent for it. */
     struct event_base *base = evconnlistener_get_base(listener);
     struct bufferevent *bev = bufferevent_socket_new(
             base, fd, BEV_OPT_CLOSE_ON_FREE);
 
-    bufferevent_setcb(bev, client_read_cb, NULL, client_event_cb, userp);
+    struct worker_callback_container *container = calloc(1, sizeof(*container));
+    container->pool = (struct worker_pool*) userp;
 
-    bufferevent_enable(bev, EV_READ | EV_WRITE);
-    printf("Client connected (%zu)\n", ++client_count);
+    bufferevent_setcb(bev, client_read_cb, NULL, client_event_cb, container);
+
+    bufferevent_enable(bev, EV_READ);
+    printf("Client connected\n");
 }
 
 static void
@@ -376,35 +195,52 @@ accept_error_cb(struct evconnlistener *listener, void *ctx) {
     event_base_loopexit(base, NULL);
 }
 
-static void
-cmd_read_cb(int fd, short what, void *arg) {
-    struct cmd_data data;
-    size_t got = read(fd, &data, sizeof(data));
-    if (got <= 0) {
-        return;
-    }
-    if (data.cb) data.cb(data.retval, data.userp);
+void
+cache_check_cb(int fd, short what, void *arg) {
+    struct smp_config *config = (struct smp_config *) arg;
+    if (config->music_info_cache_max != -1)
+        delete_oldest_until_size_requirement(config->music_info_cache_max, config->music_info_cache_path, NULL);
+    if (config->music_data_cache_max != -1)
+        delete_oldest_until_size_requirement(config->music_data_cache_max, config->music_data_cache_path, NULL);
+    if (config->album_info_cache_max != -1)
+        delete_oldest_until_size_requirement(config->album_info_cache_max, config->album_info_cache_path, NULL);
+    if (config->playlist_info_cache_max != -1)
+        delete_oldest_until_size_requirement(config->playlist_info_cache_max, config->playlist_info_cache_path, NULL);
+    if (config->total_cache_max != -1)
+        delete_oldest_until_size_requirement(config->total_cache_max, config->music_info_cache_path,
+                                             config->music_data_cache_path, config->album_info_cache_path,
+                                             config->playlist_info_cache_path, NULL);
+
 }
 
 int main(int argc, char **argv) {
+    struct smp_config config;
+    if (argc > 1)
+        parse_config(argv[1],&config);
+    else
+        parse_config("config.cfg", &config);
+    printf("Parsed config:\n");
+    print_config(&config);
+
     // Create needed directories
     mkdir("music_info", 0777);
     mkdir("music_cache", 0777);
     mkdir("album_info", 0777);
     mkdir("playlist_info", 0777);
 
+    spotify_init(argc, argv);
+
+    struct worker_pool worker_pool;
+    worker_pool.worker_count = config.worker_threads;
+    worker_pool.workers = calloc(worker_pool.worker_count, sizeof(*worker_pool.workers));
+    for (int i = 0; i < worker_pool.worker_count; ++i) {
+        worker_init(&worker_pool.workers[i]);
+        worker_pool.workers[i].id = i;
+    }
+
     struct event_base *base = NULL;
     struct evconnlistener *listener = NULL;
     struct sockaddr_in sin = {0};
-    static struct pools pool = {0};
-    pipe(cmds);
-
-    client_count = 0;
-
-    spotify_init(argc, argv, &pool.session_pool, cmds[1]);
-    http_init(&pool.http_connection_pool);
-
-    evthread_use_pthreads();
 
     base = event_base_new();
     if (!base) {
@@ -415,10 +251,15 @@ int main(int argc, char **argv) {
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(0);
     sin.sin_port = htons(PORT);
-    struct event *cmd_ev = event_new(base, cmds[0], EV_READ | EV_PERSIST, cmd_read_cb, &pool);
-    event_add(cmd_ev, NULL);
 
-    listener = evconnlistener_new_bind(base, accept_connection_cb, &pool, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE,
+    if (config.total_cache_max != -1 || config.album_info_cache_max != -1 || config.playlist_info_cache_max != -1 ||
+        config.music_data_cache_max != -1 || config.music_info_cache_max != -1) {
+        struct event *cache_check_ev = event_new(base, -1, EV_PERSIST, cache_check_cb, &config);
+        struct timeval timeval = {.tv_sec = 10, .tv_usec = 0};
+        event_add(cache_check_ev, &timeval);
+    }
+
+    listener = evconnlistener_new_bind(base, accept_connection_cb, &worker_pool, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE,
                                        -1, (struct sockaddr *) &sin, sizeof(sin));
     if (!listener) {
         perror("Couldn't create listener");
@@ -428,7 +269,8 @@ int main(int argc, char **argv) {
     printf("Listening on 0.0.0.0:%d\n", PORT);
     event_base_dispatch(base);
 
-    http_cleanup(&pool.http_connection_pool);
-    spotify_clean(&pool.session_pool);
+    for (int i = 0; i < worker_pool.worker_count; ++i) {
+        worker_cleanup(&worker_pool.workers[i]);
+    }
     return 0;
 }

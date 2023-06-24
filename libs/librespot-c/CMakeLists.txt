@@ -24,8 +24,6 @@ add_library(librespot_c
         src/shannon/ShannonInternal.h
         src/channel.c
         src/channel.h
-        src/commands.c
-        src/commands.h
         src/connection.c
         src/connection.h
         src/crypto.c
@@ -35,7 +33,6 @@ add_library(librespot_c
         librespot-c.h)
 
 target_link_libraries(librespot_c curl)
-target_link_libraries(librespot_c pthread)
 target_link_libraries(librespot_c m)
 target_link_libraries(librespot_c protobuf-c)
 target_link_libraries(librespot_c gcrypt)

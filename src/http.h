@@ -6,9 +6,11 @@
 #define SMP_BACKEND_HTTP_H
 
 #include "defs.h"
+#include "vec.h"
 #include <stdbool.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+
 
 struct http_connection_pool {
     struct connection {
@@ -21,6 +23,8 @@ struct http_connection_pool {
     SSL_CTX *ssl_ctx_api;
     char *token;
     size_t token_len;
+    struct vec queued_requests;
+    bool fetching_token;
 
     SSL *ssl_partner;
     SSL_CTX *ssl_ctx_partner;
@@ -29,16 +33,16 @@ struct http_connection_pool {
     struct connection token_connection;
     SSL *token_ssl;
     SSL_CTX *token_ssl_ctx;
+    struct event_base *base;
 };
 
 struct request_state {
     size_t response_size;
-    struct evbuffer *output;
+    int out_fd;
     struct connection *connection;
     struct http_connection_pool *pool;
     char request[URI_MAX_LEN];
     char *token;
-    int token_retries;
     struct write_job write_job;
     FILE *fp;
     bool api; // Is host api.spotify.com or api-partner.spotify.com
@@ -46,12 +50,12 @@ struct request_state {
 
 int http_init(struct http_connection_pool *pool);
 
-int http_dispatch_request_state(struct request_state *state);
+void http_set_base(struct event_base *base, struct http_connection_pool *pool);
 
-int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, struct bufferevent *bev, FILE *fp, SSL *ssl, const char *host, bool api);
+int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl, const char *host, bool api);
 
-#define http_dispatch_request_api(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, pool->ssl_api, SPOTIFY_API_HOST, true)
-#define http_dispatch_request_partner(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, pool->ssl_partner, SPOTIFY_PARTNER_HOST, false)
+#define http_dispatch_request_api(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_api, SPOTIFY_API_HOST, true)
+#define http_dispatch_request_partner(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_partner, SPOTIFY_PARTNER_HOST, false)
 
 void http_cleanup(struct http_connection_pool *pool);
 

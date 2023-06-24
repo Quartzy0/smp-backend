@@ -361,7 +361,7 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
         bufferevent_free(conn->response_bev);
         RETURN_ERROR(SP_ERR_NOCONNECTION, "Couldn't create bufferevent connection");
     }
-    conn->timeout_ev = evtimer_new(cb->evbase, cb->timeout_cb, conn);
+    conn->timeout_ev = evtimer_new(cb->evbase, cb->timeout_cb, response_cb_arg);
 
     conn->idle_ev = evtimer_new(cb->evbase, connection_idle_cb, conn);
 
@@ -646,7 +646,7 @@ response_apwelcome(uint8_t *payload, size_t payload_len, struct sp_session *sess
         memcpy(session->credentials.stored_cred, apwelcome->reusable_auth_credentials.data,
                session->credentials.stored_cred_len);
 
-        // No need for this any more
+        // No need for this anymore
         memset(session->credentials.password, 0, sizeof(session->credentials.password));
     }
 

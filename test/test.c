@@ -15,7 +15,7 @@ struct userp {
     struct event_base *base;
     size_t file_len;
     size_t progress;
-    char track[1+22];
+    char track[23];
 };
 
 enum error_type{
@@ -25,6 +25,17 @@ enum error_type{
     ET_HTTP,
     ET_FULL
 };
+
+typedef enum PacketType {
+    MUSIC_DATA = 0,
+    MUSIC_INFO = 1,
+    PLAYLIST_INFO = 2,
+    ALBUM_INFO = 3,
+    RECOMMENDATIONS = 4,
+    ARTIST_INFO = 5,
+    SEARCH = 6,
+    AVAILABLE_REGIONS = 7,
+} PacketType;
 
 void
 read_cb(struct bufferevent *bev, void *ptr) {
@@ -109,11 +120,12 @@ int main(int argc, char **argv) {
     userp.fp = fopen(fname, "w");
     userp.file_len = 0;
     userp.progress = 0;
-    userp.track[0] = 0;
+    memset(userp.track, 0, sizeof(userp.track));
     /*userp.track[1] = 2;
     userp.track[2] = 0;
     memcpy(&userp.track[3], argv[1], 22);
     memcpy(&userp.track[3+22], argv[2], 22);*/
+    userp.track[0] = MUSIC_INFO;
     memcpy(&userp.track[1], argv[1], 22);
 
     base = event_base_new();

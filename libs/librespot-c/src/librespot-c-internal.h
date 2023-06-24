@@ -70,7 +70,6 @@
 // Download in chunks of 32768 bytes. The chunks shouldn't be too large because
 // it makes seeking slow (seeking involves jumping around in the file), but
 // large enough that the file can be probed from the first chunk.
-#define SP_CHUNK_LEN_WORDS 1024 * 8
 
 // Used to create default sysinfo, which should be librespot_[short sha]_[random 8 characters build id],
 // ref https://github.com/plietar/librespot/pull/218. User may override, but
@@ -143,26 +142,6 @@ enum sp_cmd_type {
     CmdMercuryReq = 0xb2,
     CmdMercurySub = 0xb3,
     CmdMercuryUnsub = 0xb4,
-};
-
-struct sp_cmdargs {
-    struct sp_session *session;
-    struct sp_session **session_out;
-    struct sp_credentials *credentials;
-    struct sp_metadata *metadata;
-    const char *username;
-    const char *password;
-    uint8_t *stored_cred;
-    size_t stored_cred_len;
-    const char *token;
-    const char *path;
-    int fd_read;
-    int fd_write;
-    size_t seek_pos;
-    enum sp_bitrates bitrate;
-
-    sp_progress_cb progress_cb;
-    void *cb_arg;
 };
 
 struct sp_conn_callbacks {
@@ -295,6 +274,7 @@ struct sp_channel {
 
 // Linked list of sessions
 struct sp_session {
+    struct event_base *evbase;
     struct sp_connection conn;
     time_t cooldown_ts;
 
@@ -309,7 +289,7 @@ struct sp_session {
 
     struct sp_channel channels[8];
 
-    struct command *current_cmd;
+    struct cmd_data cmd_data;
 
     // Points to the channel that is streaming, and via this information about
     // the current track is also available
