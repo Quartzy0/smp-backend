@@ -37,7 +37,7 @@
 #include "proto/mercury.pb-c.h"
 #include "proto/metadata.pb-c.h"
 
-#define SP_AP_RESOLVE_URL "https://APResolve.spotify.com/"
+#define SP_AP_RESOLVE_HOST "apresolve.spotify.com"
 #define SP_AP_RESOLVE_KEY "ap_list"
 
 // Disconnect from AP after this number of secs idle

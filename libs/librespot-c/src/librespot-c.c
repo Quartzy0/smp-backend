@@ -760,6 +760,7 @@ librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks) {
     sp_initialized = true;
 
     system_info_set(&sp_sysinfo, sysinfo);
+    connection_init_lock();
 
     return 0;
 

@@ -17,8 +17,6 @@ identifiable information, encryption is not necessary.
 
 - libevent-dev
 - libgcrypt20-dev
-- libcurl4-gnutls-dev
-- libjson-c-dev
 - libprotobuf-c-dev
 - openssl
 - pthread

@@ -10,6 +10,7 @@
 #include <event2/buffer.h>
 #include <curl/curl.h>
 #include <unistd.h>
+#include <ctype.h>
 #include "openssl_hostname_validation.h"
 
 const char SPOTIFY_TOKEN_HEADER_PREFIX[] = "Bearer ";
@@ -444,9 +445,26 @@ http_cleanup(struct http_connection_pool *pool){
     free(pool->token);
 }
 
+// to_hex & urlencode from https://www.geekhideout.com/urlcode.shtml
+/* Converts an integer value to its hex character*/
+char to_hex(char code) {
+    static char hex[] = "0123456789abcdef";
+    return hex[code & 15];
+}
+
+/* Returns a url-encoded version of str */
+/* IMPORTANT: be sure to free() the returned string after use */
 char *
 urlencode(const char *src, int len) {
-    return curl_easy_escape(NULL, src, len);
+    char *buf = malloc(len * 3 + 1), *pbuf = buf;
+    for(int i = 0; i < len; i++) {
+        if (isalnum(src[i]) || src[i] == '-' || src[i] == '_' || src[i] == '.' || src[i] == '~')
+            *pbuf++ = src[i];
+        else
+            *pbuf++ = '%', *pbuf++ = to_hex((char) (src[i] >> 4)), *pbuf++ = to_hex((char) (src[i] & 15));
+    }
+    *pbuf = '\0';
+    return buf;
 }
 
 void http_set_base(struct event_base *base, struct http_connection_pool *pool) {

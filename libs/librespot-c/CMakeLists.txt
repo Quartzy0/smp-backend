@@ -32,9 +32,8 @@ add_library(librespot_c
         src/librespot-c.c
         librespot-c.h)
 
-target_link_libraries(librespot_c curl)
 target_link_libraries(librespot_c m)
 target_link_libraries(librespot_c protobuf-c)
 target_link_libraries(librespot_c gcrypt)
 target_link_libraries(librespot_c event)
-target_link_libraries(librespot_c json-c)
+target_link_libraries(librespot_c pthread)

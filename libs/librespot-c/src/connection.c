@@ -1,12 +1,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
-#include <net/if.h>
-#include <netinet/in.h>
-#include <ifaddrs.h>
-#include <errno.h>
 
-#include <json-c/json.h>
+#include <pthread.h>
 
 #ifdef HAVE_SYS_UTSNAME_H
 # include <sys/utsname.h>
@@ -39,6 +34,8 @@ struct ap_entry {
     char *address;
     uint16_t port;
 };
+static pthread_rwlock_t ap_cache_lock;
+bool lock_init = false;
 static struct ap_entry *ap_cache = NULL;
 static size_t ap_cache_len = 0;
 
@@ -94,6 +91,18 @@ debug_mock_response(struct sp_message *msg, struct sp_connection *conn)
 
 
 /* --------------------------------- Helpers -------------------------------- */
+
+void
+connection_init_lock(){
+    if (lock_init) return;
+    lock_init = true;
+    pthread_rwlockattr_t attr;
+    pthread_rwlockattr_init(&attr);
+#if _XOPEN_SOURCE >= 500 || _POSIX_C_SOURCE >= 200809L
+    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
+#endif
+    pthread_rwlock_init(&ap_cache_lock, &attr);
+}
 
 #ifdef HAVE_SYS_UTSNAME_H
 static void
@@ -193,85 +202,89 @@ file_select(uint8_t *out, size_t out_len, Track *track, enum sp_bitrates bitrate
 
 /* --------------------------- Connection handling -------------------------- */
 
+static const char *
+reverse_find(const char *str, char q, int len){
+    for (int i = len; i >= 0; i--){
+        if (str[i]==q) return &str[i];
+    }
+    return NULL;
+}
+
 // Connects to access point resolver and selects the first access point (unless
 // it matches "avoid", i.e. an access point that previously failed)
 static int
 ap_resolve(char **address, unsigned short *port, const char *avoid) {
-    char *body;
-    json_object *jresponse = NULL;
-    json_object *ap_list;
-    json_object *ap;
-    char *ap_address = NULL;
-    char *ap_port;
-    int ap_num;
+    char *body = NULL;
     int ret;
-    int i;
 
-    free(*address);
-    *address = NULL;
+    pthread_rwlock_rdlock(&ap_cache_lock);
 
     if (ap_cache) {
         for (int j = 0; j < ap_cache_len; ++j) {
             if (avoid && strncmp(avoid, ap_cache[j].address, strlen(avoid)) == 0)
                 continue;
-            *address = strdup(ap_cache[j].address);
+            *address = ap_cache[j].address;
             *port = ap_cache[j].port;
+            pthread_rwlock_unlock(&ap_cache_lock);
             return 0;
         }
+        RETURN_ERROR(SP_ERR_NOCONNECTION, "No valid access points left");
+    }
+    pthread_rwlock_unlock(&ap_cache_lock);
+    pthread_rwlock_wrlock(&ap_cache_lock);
+
+    if (ap_cache) {
+        for (int j = 0; j < ap_cache_len; ++j) {
+            if (avoid && strncmp(avoid, ap_cache[j].address, strlen(avoid)) == 0)
+                continue;
+            *address = ap_cache[j].address;
+            *port = ap_cache[j].port;
+            pthread_rwlock_unlock(&ap_cache_lock);
+            return 0;
+        }
+        RETURN_ERROR(SP_ERR_NOCONNECTION, "No valid access points left");
     }
 
-    ret = sp_cb.https_get(&body, SP_AP_RESOLVE_URL);
+    ret = sp_cb.https_get(&body, SP_AP_RESOLVE_HOST);
     if (ret < 0)
         RETURN_ERROR(SP_ERR_NOCONNECTION, "Could not connect to access point resolver");
 
-    jresponse = json_tokener_parse(body);
-    if (!jresponse)
-        RETURN_ERROR(SP_ERR_NOCONNECTION, "Could not parse reply from access point resolver");
-
-    if (!(json_object_object_get_ex(jresponse, SP_AP_RESOLVE_KEY, &ap_list) ||
-          json_object_get_type(ap_list) == json_type_array))
-        RETURN_ERROR(SP_ERR_NOCONNECTION, "Unexpected reply from access point resolver");
-
-    ap_num = json_object_array_length(ap_list);
-
-    ap_cache_len = ap_num;
+    char *arr_start = strchr(body, '[');
+    if (!arr_start)
+        RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when paring json response");
+    ap_cache_len = 1;
+    {
+        char *prev_comma = arr_start;
+        while ((prev_comma = strchr(prev_comma+1, ','))) ap_cache_len++;
+    }
     ap_cache = calloc(ap_cache_len, sizeof(*ap_cache));
-    for (i = 0; i < ap_num; i++) {
-        ap = json_object_array_get_idx(ap_list, i);
-        if (!(ap && json_object_get_type(ap) == json_type_string))
-            RETURN_ERROR(SP_ERR_NOCONNECTION, "Unexpected reply from access point resolver");
+    char *prev_sep = arr_start;
+    for (int i = 0; i < ap_cache_len; ++i) {
+        char *sep = strchr(prev_sep, ':');
+        if (!sep)
+            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response");
+        const char *address_begin = reverse_find(prev_sep, '"', (int) (sep-prev_sep));
+        if (!address_begin)
+            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response");
+        address_begin++;
+        ap_cache[i].address = strndup(address_begin, sep-address_begin);
+        ap_cache[i].port = (uint16_t) strtol(sep+1, NULL, 10);
+        printf("Cached endpoint '%s:%d'\n", ap_cache[i].address, ap_cache[i].port);
 
-        ap_cache[i].address = strdup(json_object_get_string(ap));
-        char *port_s = strchr(ap_cache[i].address, ':');
-        *(port_s++) = '\0';
-        ap_cache[i].port = (uint16_t) atoi(port_s);
-        printf("Cached ap endpoint: %s:%d\n", ap_cache[i].address, ap_cache[i].port);
-
-        if (!ap_address) {
-            if (avoid && strncmp(avoid, json_object_get_string(ap), strlen(avoid)) == 0)
-                continue; // This AP has failed on us previously, so avoid
-
-            ap_address = strdup(json_object_get_string(ap));
+        if (!*address && (!avoid || strcmp(avoid, ap_cache[i].address) != 0)){
+            *address = ap_cache[i].address;
+            *port = ap_cache[i].port;
         }
+
+        prev_sep = sep + 1;
     }
 
-    if (!ap_address)
-        RETURN_ERROR(SP_ERR_NOCONNECTION, "Unexpected reply from access point resolver, no suitable access point");
-    if (!(ap_port = strchr(ap_address, ':')))
-        RETURN_ERROR(SP_ERR_NOCONNECTION, "Unexpected reply from access point resolver, missing port");
-    *ap_port = '\0';
-    ap_port += 1;
-
-    *address = ap_address;
-    *port = (unsigned short) atoi(ap_port);
-
-    json_object_put(jresponse);
+    pthread_rwlock_unlock(&ap_cache_lock);
     free(body);
     return 0;
 
     error:
-    free(ap_address);
-    json_object_put(jresponse);
+    pthread_rwlock_unlock(&ap_cache_lock);
     free(body);
     return ret;
 }

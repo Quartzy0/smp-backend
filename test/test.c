@@ -15,7 +15,7 @@ struct userp {
     struct event_base *base;
     size_t file_len;
     size_t progress;
-    char track[23];
+    char track[25];
 };
 
 enum error_type{
@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
     userp.track[2] = 0;
     memcpy(&userp.track[3], argv[1], 22);
     memcpy(&userp.track[3+22], argv[2], 22);*/
-    userp.track[0] = MUSIC_INFO;
+    userp.track[0] = MUSIC_DATA;
     memcpy(&userp.track[1], argv[1], 22);
 
     base = event_base_new();
