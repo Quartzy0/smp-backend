@@ -82,7 +82,7 @@ write_error_spotify(int fd) {
 void
 clean_element(struct element *element) {
     if (!element) return;
-    if (element->active && element->session) {
+    if (element->session) {
         librespotc_close(element->session);
     }
     fd_vec_free(&element->fd_vec);
@@ -471,14 +471,6 @@ spotify_init(int argc, char **argv) {
         }
     }
 
-    memset(&s_sysinfo, 0, sizeof(struct sp_sysinfo));
-    snprintf(s_sysinfo.device_id, sizeof(s_sysinfo.device_id), "aabbccddeeff");
-
-    int ret = librespotc_init(&s_sysinfo, &callbacks);
-    if (ret < 0) {
-        printf("Error initializing Spotify: %s\n", librespotc_last_errmsg());
-        return -1;
-    }
     return 0;
 }
 
@@ -511,7 +503,12 @@ spotify_clean(struct session_pool *pool) {
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
         clean_element(&pool->elements[i]);
     }
+}
+
+void spotify_free_global() {
     free(credentials);
+    credentials = NULL;
     pthread_mutex_destroy(&credentials_mutex);
     librespotc_deinit();
+    free(available_regions);
 }

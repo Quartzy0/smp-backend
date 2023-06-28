@@ -36,6 +36,8 @@ struct http_connection_pool {
     struct event_base *base;
 };
 
+typedef void (*http_request_finished_cb)(void *userp);
+
 struct request_state {
     size_t response_size;
     int out_fd;
@@ -46,16 +48,19 @@ struct request_state {
     struct write_job write_job;
     FILE *fp;
     bool api; // Is host api.spotify.com or api-partner.spotify.com
+    http_request_finished_cb cb;
+    void *userp;
 };
 
 int http_init(struct http_connection_pool *pool);
 
 void http_set_base(struct event_base *base, struct http_connection_pool *pool);
 
-int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl, const char *host, bool api);
+int http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl,
+                          const char *host, bool api, http_request_finished_cb cb, void *userp);
 
-#define http_dispatch_request_api(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_api, SPOTIFY_API_HOST, true)
-#define http_dispatch_request_partner(pool, uri_in, bev, fp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_partner, SPOTIFY_PARTNER_HOST, false)
+#define http_dispatch_request_api(pool, uri_in, bev, fp, cb, userp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_api, SPOTIFY_API_HOST, true, cb, userp)
+#define http_dispatch_request_partner(pool, uri_in, bev, fp, cb, userp) http_dispatch_request(pool, uri_in, bev, fp, (pool)->ssl_partner, SPOTIFY_PARTNER_HOST, false, cb, userp)
 
 void http_cleanup(struct http_connection_pool *pool);
 

@@ -104,6 +104,15 @@ connection_init_lock(){
     pthread_rwlock_init(&ap_cache_lock, &attr);
 }
 
+void
+connection_free_lock(){
+    if (!lock_init) return;
+    lock_init = false;
+    pthread_rwlock_destroy(&ap_cache_lock);
+    free(ap_cache);
+    ap_cache = NULL;
+}
+
 #ifdef HAVE_SYS_UTSNAME_H
 static void
 system_info_from_uname(SystemInfo *system_info)
@@ -314,7 +323,6 @@ connection_clear(struct sp_connection *conn) {
 //    if (conn->incoming)
 //        evbuffer_free(conn->incoming);
 
-    free(conn->ap_address);
     free(conn->keys.shared_secret);
 
     memset(conn, 0, sizeof(struct sp_connection));

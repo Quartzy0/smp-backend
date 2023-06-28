@@ -137,3 +137,12 @@ print_config(struct smp_config *config) {
 
     PRINT_PROPERTY_INT(config, worker_threads);
 }
+
+void free_config(struct smp_config *config) {
+    free(config->global_cache_path);
+    free(config->album_info_cache_path);
+    free(config->playlist_info_cache_path);
+    free(config->music_data_cache_path);
+    free(config->music_info_cache_path);
+    memset(config, 0, sizeof(*config));
+}

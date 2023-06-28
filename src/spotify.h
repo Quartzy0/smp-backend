@@ -14,7 +14,6 @@
 extern char *available_regions;
 extern size_t available_region_count;
 
-static struct sp_sysinfo s_sysinfo;
 struct credentials {
     struct sp_credentials creds;
     char region[2];
@@ -60,6 +59,8 @@ void spotify_update_available_regions();
 void spotify_stop_element(struct element *element);
 
 void spotify_clean(struct session_pool *pool);
+
+void spotify_free_global();
 
 void
 fd_vec_init(struct fd_vec *v);

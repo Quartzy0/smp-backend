@@ -13,7 +13,7 @@
 /* ----------------------------------- Crypto ------------------------------- */
 
 #define SHA512_DIGEST_LENGTH 64
-#define bnum_new(bn)                                            \
+/*#define bnum_new(bn)                                            \
     do {                                                        \
         if (!gcry_control(GCRYCTL_INITIALIZATION_FINISHED_P)) { \
             if (!gcry_check_version("1.5.4"))                   \
@@ -21,6 +21,10 @@
             gcry_control(GCRYCTL_DISABLE_SECMEM, 0);            \
             gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);   \
         }                                                       \
+        bn = gcry_mpi_new(1);                                   \
+    } while (0)*/
+#define bnum_new(bn)                                            \
+    do {                                                        \
         bn = gcry_mpi_new(1);                                   \
     } while (0)
 #define bnum_free(bn)                 gcry_mpi_release(bn)
@@ -68,16 +72,29 @@ crypto_hexdump(const char *msg, uint8_t *mem, size_t len)
 }
 */
 
+void crypto_init() {
+    if (!gcry_control(GCRYCTL_INITIALIZATION_FINISHED_P)) {
+        const char *ret;
+        if (!(ret = gcry_check_version("1.5.4"))){
+            abort();
+        }
+        printf("libgcrypt version %s\n", ret);
+        gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
+        gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+    }
+}
+
 int
 crypto_keys_set(struct crypto_keys *keys) {
-    bnum generator;
-    bnum prime;
-    bnum private_key;
-    bnum public_key;
+    bnum generator = NULL;
+    bnum prime = NULL;
+    bnum private_key = NULL;
+    bnum public_key = NULL;
 
     bnum_bin2bn(generator, generator_bytes, sizeof(generator_bytes));
     bnum_bin2bn(prime, prime_bytes, sizeof(prime_bytes));
-    bnum_new(private_key);
+    private_key = gcry_mpi_new(1);
+//    bnum_new(private_key);
     bnum_new(public_key);
 
 //  bnum_random(private_key, 8 * (sizeof(keys->private_key) - 1)); // Not sure why it is 95 bytes?

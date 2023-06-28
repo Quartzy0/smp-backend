@@ -17,8 +17,8 @@
 struct worker_hash_table worker_id_table;
 
 void
-http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool,
-                     const char *uri_in, const char *path_in, bool api, bool insert_id_url) {
+http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool, const char *uri_in,
+                     const char *path_in, bool api, bool insert_id_url, http_request_finished_cb cb, void *userp) {
     char *uri;
     if (insert_id_url) {
         size_t uri_in_len = strlen(uri_in);
@@ -46,10 +46,10 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
         } else {
             if (api) {
                 http_dispatch_request_api(http_connection_pool, insert_id_url ? uri : uri_in, fd,
-                                          NULL);
+                                          NULL, cb, userp);
             } else {
                 http_dispatch_request_partner(http_connection_pool, insert_id_url ? uri : uri_in, fd,
-                                              NULL);
+                                              NULL, cb, userp);
             }
             // Cache is still being written, make the request without writing to the cache.
         }   // Since the API requests are very small in comparison to downloading songs, an
@@ -60,15 +60,22 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
     FILE *fp = fopen(path, "a");
 
     if (api) {
-        http_dispatch_request_api(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp);
+        http_dispatch_request_api(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp, cb, userp);
     } else {
-        http_dispatch_request_partner(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp);
+        http_dispatch_request_partner(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp, cb, userp);
     }
 }
 
 void
 element_finished_cb(struct element *element, void *arg){
     hash_table_remove(&worker_id_table, element->id);
+    ((struct worker*)arg)->job_count--;
+}
+
+void
+http_request_finished(void *arg){
+    struct worker *worker = (struct worker*) arg;
+    worker->job_count--;
 }
 
 static void
@@ -81,6 +88,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             char path[35] = "music_cache/";
             memcpy(&path[12], req.regioned_id.id, 22);
             path[34] = 0;
+            worker->job_count++;
 
             size_t progress = 0;
             if (!access(path, R_OK)) {
@@ -105,7 +113,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                     }
                     if (element) {
                         fd_vec_add(&element->fd_vec, req.client_fd);
-                        printf("Sending data for '%.22s' from cache while reading\n", req.regioned_id.id);
+                        printf("[worker %d] Sending data for '%.22s' from cache while reading\n", worker->id, req.regioned_id.id);
                         fclose(fp);
                         return;
                     } else {
@@ -113,26 +121,29 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                     }
                     fclose(fp);
                 } else {
-                    printf("Sending data for '%.22s' from cache\n", req.regioned_id.id);
+                    printf("[worker %d] Sending data for '%.22s' from cache\n", worker->id, req.regioned_id.id);
                     fclose(fp);
                     return;
                 }
             }
-            printf("Sending data for '%.22s'\n", req.regioned_id.id);
+            printf("[worker %d] Sending data for '%.22s'\n", worker->id, req.regioned_id.id);
 
-            spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd, req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb, NULL, worker->base);
+            spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd, req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb, worker, worker->base);
             break;
         }
         case MUSIC_INFO: {
-            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/tracks/", "music_info/", true, true);
+            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/tracks/",
+                                 "music_info/", true, true, http_request_finished, worker);
             break;
         }
         case PLAYLIST_INFO: {
-            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/playlists/", "playlist_info/", true, true);
+            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/playlists/",
+                                 "playlist_info/", true, true, http_request_finished, worker);
             break;
         }
         case ALBUM_INFO: {
-            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/albums/", "album_info/", true, true);
+            http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/albums/",
+                                 "album_info/", true, true, http_request_finished, worker);
             break;
         }
         case ARTIST_INFO: {
@@ -167,7 +178,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
 
             printf("url: %s\n", uri);
 
-            http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL);
+            http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL, http_request_finished, worker);
             free(uri);
             return;
         }
@@ -211,7 +222,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             memcpy(uri_b, "&limit=30", 9);
             uri[uri_len - 1] = 0;
             printf("Performing request using uri: %s\n", uri);
-            http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL);
+            http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL, http_request_finished, worker);
             break;
         }
         case DISCONNECTED: {
@@ -228,6 +239,14 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             }
             break;
         }
+        case CLEANUP: {
+            http_cleanup(&worker->http_connection_pool);
+            spotify_clean(&worker->session_pool);
+            close(worker->cmd[1]);
+            close(worker->cmd[0]);
+            event_free(worker->cmd_ev);
+            event_base_loopbreak(worker->base);
+        }
         default: break;
     }
 }
@@ -238,9 +257,11 @@ worker_loop(void *arg) {
     worker->base = event_base_new();
     worker->cmd_ev = event_new(worker->base, worker->cmd[0], EV_READ | EV_PERSIST, cmd_read_cb, worker);
     event_add(worker->cmd_ev, NULL);
-    vec_init(&worker->clients);
+    worker->job_count = 0;
     http_set_base(worker->base, &worker->http_connection_pool);
     event_base_dispatch(worker->base);
+    event_base_free(worker->base);
+    printf("Worker %d freed\n", worker->id);
     pthread_exit(NULL);
 }
 
@@ -267,9 +288,9 @@ worker_find_least_busy(struct worker *workers, size_t count) {
     size_t lowest = -1;
     struct worker *lw;
     for (int i = 0; i < count; ++i) {
-        if (workers[i].clients.len == 0) return &workers[i];
-        if (workers[i].clients.len < lowest){
-            lowest = workers[i].clients.len;
+        if (workers[i].job_count == 0) return &workers[i];
+        if (workers[i].job_count < lowest){
+            lowest = workers[i].job_count;
             lw = &workers[i];
         }
     }
@@ -293,7 +314,7 @@ hash_table_remove(struct worker_hash_table *table, const char *key){
     pthread_mutex_lock(&table->mutex);
     struct worker_hash_table_bucket *bucket = &table->buckets[bucket_index];
     for (int i = 0; i < bucket->len; ++i) {
-        if (bucket->elements && !memcpy(bucket->elements[i].key, key, 22)) {
+        if (bucket->elements && !memcmp(bucket->elements[i].key, key, 22)) {
             if (i == bucket->len - 1) break;
             memmove(&bucket->elements[i], &bucket->elements[i+1], bucket->len-(i+1));
             bucket->len--;
@@ -317,7 +338,7 @@ hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, stru
     pthread_mutex_lock(&table->mutex);
     struct worker_hash_table_bucket *bucket = &table->buckets[bucket_index];
     for (int i = 0; i < bucket->len; ++i) {
-        if (bucket->elements && !memcpy(bucket->elements[i].key, key, 22)) {
+        if (bucket->elements && !memcmp(bucket->elements[i].key, key, 22)) {
             pthread_mutex_unlock(&table->mutex);
             return &bucket->elements[i];
         }
@@ -339,7 +360,20 @@ hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, stru
     return &bucket->elements[bucket->len-1];
 }
 
+void
+hash_table_clean(struct worker_hash_table *table){
+    pthread_mutex_lock(&table->mutex);
+    for (int i = 0; i < WORKER_HASH_TABLE_BUCKETS; ++i) {
+        free(table->buckets[i].elements);
+    }
+    pthread_mutex_unlock(&table->mutex);
+    pthread_mutex_destroy(&table->mutex);
+    memset(table, 0, sizeof(*table));
+}
+
 void worker_cleanup(struct worker *worker) {
-    http_cleanup(&worker->http_connection_pool);
-    spotify_clean(&worker->session_pool);
+    struct worker_request req = {
+            .type = CLEANUP,
+    };
+    worker_send_request(worker, &req);
 }

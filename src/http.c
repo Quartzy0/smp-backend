@@ -363,7 +363,8 @@ http_dispatch_request_state(struct request_state *state) {
 }
 
 int
-http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl, const char *host, bool api) {
+http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl,
+                      const char *host, bool api, http_request_finished_cb cb, void *userp) {
     struct event_base *base = pool->base;
 
     struct connection *connection;
@@ -425,6 +426,10 @@ http_cleanup(struct http_connection_pool *pool){
         SSL_CTX_free(pool->token_ssl_ctx);
     if (pool->token_ssl)
         SSL_free(pool->token_ssl);
+    if (pool->ssl_ctx_partner)
+        SSL_CTX_free(pool->ssl_ctx_partner);
+    if (pool->ssl_partner)
+        SSL_free(pool->ssl_partner);
 #if (OPENSSL_VERSION_NUMBER < 0x10100000L) || \
     (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20700000L)
     EVP_cleanup();
@@ -443,6 +448,7 @@ http_cleanup(struct http_connection_pool *pool){
 	(defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER < 0x20700000L) */
 
     free(pool->token);
+    vec_free(&pool->queued_requests);
 }
 
 // to_hex & urlencode from https://www.geekhideout.com/urlcode.shtml

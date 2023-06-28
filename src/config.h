@@ -25,5 +25,6 @@ struct smp_config{
 
 int parse_config(const char *file, struct smp_config *config_out);
 void print_config(struct smp_config *config);
+void free_config(struct smp_config *config);
 
 #endif //SMP_BACKEND_CONFIG_H

@@ -30,6 +30,8 @@ struct crypto_keys {
     size_t shared_secret_len;
 };
 
+void
+crypto_init();
 
 void
 crypto_shared_secret(uint8_t **shared_secret_bytes, size_t *shared_secret_bytes_len,

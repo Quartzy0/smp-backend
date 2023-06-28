@@ -2,6 +2,9 @@ void
 connection_init_lock();
 
 void
+connection_free_lock();
+
+void
 ap_disconnect(struct sp_connection *conn);
 
 enum sp_error

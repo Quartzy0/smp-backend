@@ -761,6 +761,7 @@ librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks) {
 
     system_info_set(&sp_sysinfo, sysinfo);
     connection_init_lock();
+    crypto_init();
 
     return 0;
 
@@ -773,6 +774,7 @@ void
 librespotc_deinit() {
     sp_initialized = false;
     memset(&sp_cb, 0, sizeof(struct sp_callbacks));
+    connection_free_lock();
 }
 
 int

@@ -8,11 +8,14 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <signal.h>
 #include "defs.h"
 #include "spotify.h"
 #include "util.h"
 #include "config.h"
 #include "worker.h"
+
+static struct sp_sysinfo s_sysinfo;
 
 struct worker_pool{
     struct worker *workers;
@@ -63,7 +66,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             }
             printf("Track requested: %.22s\n", id);
 
-            struct worker_hash_table_element *worker = hash_table_put_if_not_get(&worker_id_table, id, worker_find_least_busy(worker_pool->workers, worker_pool->worker_count));
+            struct worker_hash_table_element *worker = hash_table_put_if_not_get(&worker_id_table, (const char*) id, worker_find_least_busy(worker_pool->workers, worker_pool->worker_count));
             struct worker_request req = {0};
             req.type = MUSIC_DATA;
             req.client_fd = fd;
@@ -103,7 +106,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             req.type = SEARCH;
             req.client_fd = fd;
             req.search_query.flags = flags;
-            req.search_query.generic_query = urlencode(&in[2 + sizeof(uint16_t)], q_len);
+            req.search_query.generic_query = urlencode((const char *) &in[2 + sizeof(uint16_t)], q_len);
             worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
             evbuffer_drain(input, 2 + sizeof(uint16_t) + q_len);
             return;
@@ -213,6 +216,12 @@ cache_check_cb(int fd, short what, void *arg) {
 
 }
 
+void sigterm_handler(int signal, short events, void *arg)
+{
+    event_base_loopbreak(arg);
+    printf("Signal received, shutting down...\n");
+}
+
 int main(int argc, char **argv) {
     struct smp_config config;
     if (argc > 1)
@@ -244,9 +253,22 @@ int main(int argc, char **argv) {
 
     base = event_base_new();
     if (!base) {
-        fprintf(stderr, "Couldn't open event base");
+        fprintf(stderr, "Couldn't open event base\n");
         return 1;
     }
+
+    struct event *sigterm_event;
+    sigterm_event = evsignal_new(base, SIGTERM, sigterm_handler, base);
+    evsignal_add(sigterm_event, NULL);
+
+    struct event *sigint_event;
+    sigint_event = evsignal_new(base, SIGINT, sigterm_handler, base);
+    evsignal_add(sigint_event, NULL);
+
+    struct event *sighup_event;
+    sighup_event = evsignal_new(base, SIGHUP, sigterm_handler, base);
+    evsignal_add(sighup_event, NULL);
+
     memset(&sin, 0, sizeof(sin));
     sin.sin_family = AF_INET;
     sin.sin_addr.s_addr = htonl(0);
@@ -257,6 +279,15 @@ int main(int argc, char **argv) {
         struct event *cache_check_ev = event_new(base, -1, EV_PERSIST, cache_check_cb, &config);
         struct timeval timeval = {.tv_sec = 10, .tv_usec = 0};
         event_add(cache_check_ev, &timeval);
+    }
+
+    memset(&s_sysinfo, 0, sizeof(struct sp_sysinfo));
+    snprintf(s_sysinfo.device_id, sizeof(s_sysinfo.device_id), "aabbccddeeff");
+
+    int ret = librespotc_init(&s_sysinfo, &callbacks);
+    if (ret < 0) {
+        printf("Error initializing Spotify: %s\n", librespotc_last_errmsg());
+        return -1;
     }
 
     listener = evconnlistener_new_bind(base, accept_connection_cb, &worker_pool, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE,
@@ -270,7 +301,23 @@ int main(int argc, char **argv) {
     event_base_dispatch(base);
 
     for (int i = 0; i < worker_pool.worker_count; ++i) {
-        worker_cleanup(&worker_pool.workers[i]);
+        struct worker *worker = &worker_pool.workers[i];
+        worker_cleanup(worker);
     }
+    for (int i = 0; i < worker_pool.worker_count; ++i) {
+        struct worker *worker = &worker_pool.workers[i];
+        pthread_join(worker->tid, NULL);
+    }
+    hash_table_clean(&worker_id_table);
+    free(worker_pool.workers);
+    event_free(sigterm_event);
+    event_free(sigint_event);
+    event_free(sighup_event);
+    evconnlistener_free(listener);
+    event_base_free(base);
+    spotify_free_global();
+    free_config(&config);
+    printf("Main thread freed\n");
+
     return 0;
 }

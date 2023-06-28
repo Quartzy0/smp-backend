@@ -24,6 +24,7 @@ typedef enum PacketType {
 
 
     DISCONNECTED = 0xff, // Only used for communication between master thread and workers
+    CLEANUP = 0xfa,
 } PacketType;
 
 struct worker_request{
@@ -54,7 +55,7 @@ struct worker{
     struct event_base *base;
     struct event *cmd_ev;
 
-    struct vec clients;
+    size_t job_count;
 
     struct session_pool session_pool;
     struct http_connection_pool http_connection_pool;
@@ -79,6 +80,8 @@ void hash_table_init(struct worker_hash_table *table);
 struct worker_hash_table_element* hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker);
 
 void hash_table_remove(struct worker_hash_table *table, const char *key);
+
+void hash_table_clean(struct worker_hash_table *table);
 
 struct worker* worker_find_least_busy(struct worker *workers, size_t count);
 
