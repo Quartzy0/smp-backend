@@ -18,6 +18,8 @@ pthread_mutex_t credentials_mutex;
 char *available_regions;
 size_t available_region_count;
 
+char top_region[2];
+
 struct credentials *get_credentials();
 
 static void
@@ -96,8 +98,16 @@ static void
 session_error(
         struct sp_session *session, enum sp_error err,
         void *userp) { // On session error, create a new session in its place and continue playing the previous song
-    if (err == SP_ERR_NOCONNECTION || err == SP_ERR_TRACK_NOT_FOUND) return;
+    if (err == SP_ERR_NOCONNECTION) return;
     struct element *element = (struct element *) userp;
+    if (err == SP_ERR_TRACK_NOT_FOUND){
+        fprintf(stderr, "Track not found error: '%s'\n", element->id);
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            write_error_spotify(element->fd_vec.el[i]);
+        }
+        clean_element(element);
+        return;
+    }
     if (element->retries >= 3){
         fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.\n");
         for (int i = 0; i < element->fd_vec.len; ++i) {
@@ -205,6 +215,7 @@ spotify_file_open_cb(int fd, void *userp) {
     struct element *element = (struct element *) userp;
 
     if (fd < 0) {
+        fprintf(stderr, "Error opening librespot file: %s\n", librespotc_last_errmsg());
         for (int i = 0; i < element->fd_vec.len; ++i) {
             write_error_spotify(element->fd_vec.el[i]);
         }
@@ -260,7 +271,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
 
     int uninit = -1;
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-        if (!pool->elements[i].active && (!region || (region[0] == pool->elements[i].creds->region[0] && region[1] == pool->elements[i].creds->region[1]))) {
+        if (!pool->elements[i].active && (!region || !pool->elements[i].creds || (region[0] == pool->elements[i].creds->region[0] && region[1] == pool->elements[i].creds->region[1]))) {
             if (pool->elements[i].session) {
                 pool->elements[i].active = true;
                 pool->elements[i].progress = progress;
@@ -474,6 +485,16 @@ spotify_init(int argc, char **argv) {
     return 0;
 }
 
+struct region_count_container{
+    char region[2];
+    int count;
+};
+
+int region_count_container_comprar(const void *a, const void *b){
+    return ((const struct region_count_container*)b)->count-((const struct region_count_container*)a)->count;
+}
+
+// Puts all available regions into a list and also sorts them in terms of how many accounts use that region
 void
 spotify_update_available_regions() { // TODO: Make this thread safe
     if (available_regions){
@@ -481,20 +502,30 @@ spotify_update_available_regions() { // TODO: Make this thread safe
         available_regions = NULL;
     }
     available_region_count = 0;
-    available_regions = calloc(credentials_count, sizeof(*available_regions) * 2);
+    struct region_count_container regions_container[credentials_count];
     for (int i = 0; i < credentials_count; ++i) {
         // Check if region already included
-        char *r = memchr(available_regions, credentials[i].region[0], available_region_count * 2 * sizeof(sizeof(*available_regions)));
-        if (r && r[1] == credentials[i].region[1]) continue; // Already included
+        for (int j = 0; j < available_region_count; ++j) {
+            if (regions_container[j].region[0] == credentials[i].region[0] && regions_container[j].region[1] == credentials[i].region[1]){
+                regions_container[j].count++;
+                goto loop_end;
+            }
+        }
 
-        available_regions[available_region_count*2] = credentials[i].region[0];
-        available_regions[available_region_count*2+1] = credentials[i].region[1];
+        regions_container[available_region_count].region[0] = credentials[i].region[0];
+        regions_container[available_region_count].region[1] = credentials[i].region[1];
+        regions_container[available_region_count].count = 1;
         available_region_count++;
+        loop_end:;
     }
-    if (available_region_count != credentials_count){ // realloc to exact size
-        char *tmp = realloc(available_regions, available_region_count * sizeof(*available_regions) * 2);
-        if (!tmp) perror("error calling realloc");
-        available_regions = tmp;
+    qsort(regions_container, available_region_count, sizeof(*regions_container), region_count_container_comprar);
+    top_region[0] = regions_container[0].region[0];
+    top_region[1] = regions_container[0].region[1];
+
+    available_regions = calloc(available_region_count, sizeof(char)*2);
+    for (int i = 0; i < available_region_count; ++i) {
+        available_regions[i*2] = regions_container[i].region[0];
+        available_regions[i*2+1] = regions_container[i].region[1];
     }
 }
 

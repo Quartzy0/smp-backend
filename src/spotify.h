@@ -19,6 +19,7 @@ struct credentials {
     char region[2];
     size_t uses;
 };
+extern char top_region[2];
 
 struct element;
 typedef void (*audio_finished_cb)(struct element *element, void *arg);

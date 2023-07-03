@@ -15,6 +15,7 @@
 #include "util.h"
 
 struct worker_hash_table worker_id_table;
+char region_url_insertion[] = "?market=";
 
 void
 http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool, const char *uri_in,
@@ -22,9 +23,12 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
     char *uri;
     if (insert_id_url) {
         size_t uri_in_len = strlen(uri_in);
-        uri = calloc(22 + uri_in_len + 1, sizeof(*uri));
+        uri = calloc(22 + uri_in_len + sizeof(region_url_insertion) + 2, sizeof(*uri));
         memcpy(uri, uri_in, uri_in_len);
         memcpy(&uri[uri_in_len], id, 22);
+        memcpy(&uri[uri_in_len+22], region_url_insertion, sizeof(region_url_insertion)-1);
+        uri[uri_in_len+22+sizeof(region_url_insertion)-1] = top_region[0];
+        uri[uri_in_len+22+sizeof(region_url_insertion)] = top_region[1];
     }
 
     size_t path_in_len = strlen(path_in);
@@ -101,29 +105,34 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                 size_t actual_len = ftell(fp);
                 rewind(fp);
 
-                int fd = fileno(fp);
-                sendfile(req.client_fd, fd, NULL, actual_len);
-                if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // Check if file is fully written
-                    struct element *element = NULL;
-                    for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-                        if (!memcmp(worker->session_pool.elements[i].id, req.regioned_id.id, sizeof(worker->session_pool.elements[i].id))) {
-                            element = &worker->session_pool.elements[i];
-                            break;
+                if (tmp_data[0] != ET_NO_ERROR){
+                    fclose(fp); // File contains an error response (somehow)
+                    remove(path);
+                } else{
+                    int fd = fileno(fp);
+                    sendfile(req.client_fd, fd, NULL, actual_len);
+                    if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // Check if file is fully written
+                        struct element *element = NULL;
+                        for (int i = 0; i < SESSION_POOL_MAX; ++i) {
+                            if (!memcmp(worker->session_pool.elements[i].id, req.regioned_id.id, sizeof(worker->session_pool.elements[i].id))) {
+                                element = &worker->session_pool.elements[i];
+                                break;
+                            }
                         }
-                    }
-                    if (element) {
-                        fd_vec_add(&element->fd_vec, req.client_fd);
-                        printf("[worker %d] Sending data for '%.22s' from cache while reading\n", worker->id, req.regioned_id.id);
+                        if (element) {
+                            fd_vec_add(&element->fd_vec, req.client_fd);
+                            printf("[worker %d] Sending data for '%.22s' from cache while reading\n", worker->id, req.regioned_id.id);
+                            fclose(fp);
+                            return;
+                        } else {
+                            progress = actual_len - sizeof(tmp_data);
+                        }
+                        fclose(fp);
+                    } else {
+                        printf("[worker %d] Sending data for '%.22s' from cache\n", worker->id, req.regioned_id.id);
                         fclose(fp);
                         return;
-                    } else {
-                        progress = actual_len - sizeof(tmp_data);
                     }
-                    fclose(fp);
-                } else {
-                    printf("[worker %d] Sending data for '%.22s' from cache\n", worker->id, req.regioned_id.id);
-                    fclose(fp);
-                    return;
                 }
             }
             printf("[worker %d] Sending data for '%.22s'\n", worker->id, req.regioned_id.id);
