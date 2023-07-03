@@ -7,7 +7,7 @@
 
 #include "librespot-util.h"
 #include "stdbool.h"
-#include "defs.h"
+#include "util.h"
 #include "vec.h"
 #include <event2/bufferevent.h>
 

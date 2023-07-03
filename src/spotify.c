@@ -3,8 +3,7 @@
 //
 
 #include "spotify.h"
-#include "vec.h"
-#include "defs.h"
+#include "util.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>

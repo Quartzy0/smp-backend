@@ -3,7 +3,7 @@
 //
 
 #include "http.h"
-#include "defs.h"
+#include "util.h"
 #include <event2/bufferevent_ssl.h>
 #include <event2/http.h>
 #include <event2/http_struct.h>

@@ -30,6 +30,7 @@ add_library(librespot_c
         src/crypto.h
         src/librespot-c-internal.h
         src/librespot-c.c
+        src/cmd.h
         librespot-c.h)
 
 target_link_libraries(librespot_c m)

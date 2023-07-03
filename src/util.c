@@ -9,6 +9,24 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <unistd.h>
+
+void
+write_error(int fd, enum error_type err, const char *msg) {
+    if (fd == -1) return;
+    char data[1 + sizeof(size_t)];
+    data[0] = err;
+
+    if (msg) {
+        size_t len = strlen(msg);
+        memcpy(&data[1], &len, sizeof(len));
+        write(fd, data, sizeof(data));
+        write(fd, msg, len * sizeof(*msg));
+    } else {
+        memset(&data[1], 0, sizeof(size_t));
+        write(fd, data, sizeof(data));
+    }
+}
 
 size_t
 get_dir_size(const char *path){

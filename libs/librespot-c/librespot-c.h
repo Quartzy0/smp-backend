@@ -5,7 +5,7 @@
 #include <stddef.h>
 #include <pthread.h>
 #include <event2/event.h>
-#include "../../src/cmd.h"
+#include "src/cmd.h"
 #include <stdbool.h>
 
 #define LIBRESPOT_C_VERSION_MAJOR 0

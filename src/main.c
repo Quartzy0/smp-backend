@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
-#include "defs.h"
 #include "spotify.h"
 #include "util.h"
 #include "config.h"
@@ -26,23 +25,6 @@ struct worker_callback_container{
     struct worker_pool *pool;
     struct worker *worker;
 };
-
-void
-write_error(int fd, enum error_type err, const char *msg) {
-    if (fd == -1) return;
-    char data[1 + sizeof(size_t)];
-    data[0] = err;
-
-    if (msg) {
-        size_t len = strlen(msg);
-        memcpy(&data[1], &len, sizeof(len));
-        write(fd, data, sizeof(data));
-        write(fd, msg, len * sizeof(*msg));
-    } else {
-        memset(&data[1], 0, sizeof(size_t));
-        write(fd, data, sizeof(data));
-    }
-}
 
 static void
 client_read_cb(struct bufferevent *bev, void *ctx){

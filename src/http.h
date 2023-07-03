@@ -5,7 +5,7 @@
 #ifndef SMP_BACKEND_HTTP_H
 #define SMP_BACKEND_HTTP_H
 
-#include "defs.h"
+#include "util.h"
 #include "vec.h"
 #include <stdbool.h>
 #include <openssl/ssl.h>
