@@ -1,4 +1,3 @@
-#include "debug.h"
 #include <event2/event.h>
 #include <string.h>
 #include <event2/listener.h>
@@ -9,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#include <jdm.h>
 #include "spotify.h"
 #include "util.h"
 #include "config.h"
@@ -28,25 +28,29 @@ struct worker_callback_container{
 
 static void
 client_read_cb(struct bufferevent *bev, void *ctx){
+    JDM_ENTER_FUNCTION;
     struct worker_callback_container *container = (struct worker_callback_container*)ctx;
     struct worker_pool *worker_pool = container->pool;
     int fd = bufferevent_getfd(bev);
 
     struct evbuffer *input = bufferevent_get_input(bev);
     size_t in_len = evbuffer_get_length(input);
-    if (in_len < 1) return; // Wait for more data
+    if (in_len < 1) {
+        JDM_LEAVE_FUNCTION;
+        return; // Wait for more data
+    }
     uint8_t *in = evbuffer_pullup(input, -1);
     switch (in[0]) {
         case MUSIC_DATA: {
-            if (in_len < 25) return; // Wait for more data
+            if (in_len < 25) break; // Wait for more data
             uint8_t *id = &in[1];
             if (!is_valid_id(id)) {
-                printf("Invalid track id: %.22s\n", id);
+                JDM_TRACE("Invalid track id: %.22s", id);
                 write_error(fd, ET_SPOTIFY, "Invalid track id");
                 evbuffer_drain(input, 25);
-                return;
+                break;
             }
-            printf("Track requested: %.22s\n", id);
+            JDM_TRACE("Track requested: %.22s", id);
 
             struct worker_hash_table_element *worker = hash_table_put_if_not_get(&worker_id_table, (const char*) id, worker_find_least_busy(worker_pool->workers, worker_pool->worker_count));
             struct worker_request req = {0};
@@ -58,7 +62,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             container->worker = worker->worker;
 
             evbuffer_drain(input, 25);
-            return;
+            break;
         }
         case PLAYLIST_INFO:
         case ALBUM_INFO:
@@ -68,7 +72,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             if (!is_valid_id(id)) {
                 write_error(fd, ET_SPOTIFY, "Invalid track id");
                 evbuffer_drain(input, 23);
-                return;
+                break;
             }
             struct worker_request req = {0};
             req.type = in[0];
@@ -76,13 +80,13 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             memcpy(req.generic_id, id, sizeof(req.generic_id));
             worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
             evbuffer_drain(input, 23);
-            return;
+            break;
         }
         case SEARCH: {
-            if (in_len < 2 + sizeof(uint16_t)) return;
+            if (in_len < 2 + sizeof(uint16_t)) break;
             uint8_t flags = in[1];
             uint16_t q_len = *((uint16_t *) &in[2]);
-            if (in_len < 2 + sizeof(uint16_t) + q_len) return;
+            if (in_len < 2 + sizeof(uint16_t) + q_len) break;
 
             struct worker_request req = {0};
             req.type = SEARCH;
@@ -91,7 +95,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             req.search_query.generic_query = urlencode((const char *) &in[2 + sizeof(uint16_t)], q_len);
             worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
             evbuffer_drain(input, 2 + sizeof(uint16_t) + q_len);
-            return;
+            break;
         }
         case AVAILABLE_REGIONS: {
             char resp[sizeof(available_region_count) + 1];
@@ -100,21 +104,21 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             write(fd, &resp, sizeof(resp));
             write(fd, available_regions, available_region_count*2);
             evbuffer_drain(input, 1);
-            return;
+            break;
         }
         case RECOMMENDATIONS: {
-            if (in_len < 25) return;
+            if (in_len < 25) break;
             uint8_t *n = &in[1];// 0: number of seed tracks, 1: number of seed artists TODO: Support seed genres
             size_t sum = n[0] + n[1];
             size_t expected_len = sum * 22;
             if (sum > 5) { // There can be a maximum of 5 seed tracks, artists and genres in total
                 write_error(fd, ET_SPOTIFY, "Maximum of 5 seed tracks, artists in total are allowed");
                 evbuffer_drain(input, 3 + expected_len);
-                return;
+                break;
             } else if (sum < 1) {
                 write_error(fd, ET_SPOTIFY, "At least 1 seed track, artist must be provided");
                 evbuffer_drain(input, 3 + expected_len);
-                return;
+                break;
             }
             if (in_len < 3 + expected_len) return; // Not enough data
 
@@ -126,17 +130,19 @@ client_read_cb(struct bufferevent *bev, void *ctx){
             memcpy(&req.recommendation_seed.ids[0][0], &n[2], expected_len);
             worker_send_request(worker_find_least_busy(worker_pool->workers, worker_pool->worker_count), &req);
             evbuffer_drain(input, expected_len + 3);
-            return;
+            break;
         }
         default:
             evbuffer_drain(input, 1); //Invalid data
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 client_event_cb(struct bufferevent *bev, short events, void *ctx) {
+    JDM_ENTER_FUNCTION;
     if (events & BEV_EVENT_ERROR)
-        perror("Error from bufferevent");
+        JDM_TRACE("Error from bufferevent: %s", JDM_ERRNO_MESSAGE);
     if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
         struct worker_callback_container *container = (struct worker_callback_container*) ctx;
         if (container->worker){
@@ -146,13 +152,15 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
             worker_send_request(container->worker, &req);
         }
         bufferevent_free(bev);
-        printf("Client disconnected\n");
+        JDM_TRACE("Client disconnected");
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 accept_connection_cb(struct evconnlistener *listener, evutil_socket_t fd, struct sockaddr *addr, int socklen,
                      void *userp) {
+    JDM_ENTER_FUNCTION;
     int flags = fcntl(fd, F_GETFL, 0);
     if (!(flags & O_NONBLOCK)) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 
@@ -167,17 +175,20 @@ accept_connection_cb(struct evconnlistener *listener, evutil_socket_t fd, struct
     bufferevent_setcb(bev, client_read_cb, NULL, client_event_cb, container);
 
     bufferevent_enable(bev, EV_READ);
-    printf("Client connected\n");
+    JDM_TRACE("Client connected");
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 accept_error_cb(struct evconnlistener *listener, void *ctx) {
+    JDM_ENTER_FUNCTION;
     struct event_base *base = evconnlistener_get_base(listener);
     int err = EVUTIL_SOCKET_ERROR();
-    fprintf(stderr, "Got an error %d (%s) on the listener. "
-                    "Shutting down.\n", err, evutil_socket_error_to_string(err));
+    JDM_ERROR("Got an error %d (%s) on the listener. "
+                    "Shutting down.", err, evutil_socket_error_to_string(err));
 
     event_base_loopexit(base, NULL);
+    JDM_LEAVE_FUNCTION;
 }
 
 void
@@ -200,17 +211,25 @@ cache_check_cb(int fd, short what, void *arg) {
 
 void sigterm_handler(int signal, short events, void *arg)
 {
+    JDM_ENTER_FUNCTION;
     event_base_loopbreak(arg);
-    printf("Signal received, shutting down...\n");
+    JDM_INFO("Signal received, shutting down...");
+    JDM_LEAVE_FUNCTION;
 }
 
 int main(int argc, char **argv) {
+    jdm_init_thread("Main thread", JDM_MESSAGE_LEVEL_NONE, 256, 256, NULL);
+    jdm_set_hook(error_message_hook, NULL);
+    JDM_ENTER_FUNCTION;
+
+    set_sigsegv_handler();
+
     struct smp_config config;
     if (argc > 1)
         parse_config(argv[1],&config);
     else
         parse_config("config.cfg", &config);
-    printf("Parsed config:\n");
+    JDM_INFO("Parsed config:");
     print_config(&config);
 
     // Create needed directories
@@ -235,7 +254,9 @@ int main(int argc, char **argv) {
 
     base = event_base_new();
     if (!base) {
-        fprintf(stderr, "Couldn't open event base\n");
+        JDM_ERROR("Couldn't open event base");
+        JDM_LEAVE_FUNCTION;
+        jdm_cleanup_thread();
         return 1;
     }
 
@@ -268,18 +289,22 @@ int main(int argc, char **argv) {
 
     int ret = librespotc_init(&s_sysinfo, &callbacks);
     if (ret < 0) {
-        printf("Error initializing Spotify: %s\n", librespotc_last_errmsg());
+        JDM_ERROR("Error initializing Spotify: %s", librespotc_last_errmsg());
+        JDM_LEAVE_FUNCTION;
+        jdm_cleanup_thread();
         return -1;
     }
 
     listener = evconnlistener_new_bind(base, accept_connection_cb, &worker_pool, LEV_OPT_CLOSE_ON_FREE | LEV_OPT_REUSEABLE,
                                        -1, (struct sockaddr *) &sin, sizeof(sin));
     if (!listener) {
-        perror("Couldn't create listener");
+        JDM_ERROR("Couldn't create listener: %s", JDM_ERRNO_MESSAGE);
+        JDM_LEAVE_FUNCTION;
+        jdm_cleanup_thread();
         return 1;
     }
     evconnlistener_set_error_cb(listener, accept_error_cb);
-    printf("Listening on 0.0.0.0:%d\n", PORT);
+    JDM_INFO("Listening on 0.0.0.0:%d", PORT);
     event_base_dispatch(base);
 
     for (int i = 0; i < worker_pool.worker_count; ++i) {
@@ -299,7 +324,10 @@ int main(int argc, char **argv) {
     event_base_free(base);
     spotify_free_global();
     free_config(&config);
-    printf("Main thread freed\n");
+    JDM_INFO("Main thread freed");
+
+    JDM_LEAVE_FUNCTION;
+    jdm_cleanup_thread();
 
     return 0;
 }

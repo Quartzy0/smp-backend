@@ -46,6 +46,7 @@ events for proceeding are activated directly.
 "wait": waiting for more data or for write to become possible
 "timeout": receive or write took too long to complete
 */
+#include <jdm.h>
 
 #include "librespot-c-internal.h"
 #include "connection.h"
@@ -79,6 +80,7 @@ static void
 session_free(struct sp_session *session) {
     if (!session)
         return;
+    JDM_ENTER_FUNCTION;
 
     channel_free_all(session);
 
@@ -89,6 +91,7 @@ session_free(struct sp_session *session) {
 
     free(session->ap_avoid);
     free(session);
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
@@ -97,13 +100,15 @@ session_cleanup(struct sp_session *session) {
 
     if (!session)
         return;
-
+    JDM_ENTER_FUNCTION;
     session_free(session);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 session_new(struct sp_session **out, event_callback_fn cb, const char *username, const char *password,
             const char *stored_cred, size_t stored_cred_len, const char *token, struct event_base *evbase) {
+    JDM_ENTER_FUNCTION;
     struct sp_session *session;
     int ret;
 
@@ -138,10 +143,12 @@ session_new(struct sp_session **out, event_callback_fn cb, const char *username,
 
     *out = session;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     session_free(session);
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -153,6 +160,7 @@ session_check(struct sp_session *session) {
 static void
 session_return(struct sp_session *session, enum sp_error err) {
     if (err < 0) return;
+    JDM_ENTER_FUNCTION;
 
     /*ret = commands_exec_returnvalue(session);
     if (ret == 0) // Here we are async, i.e. no pending command
@@ -163,7 +171,7 @@ session_return(struct sp_session *session, enum sp_error err) {
             channel_stop(channel); //
     }*/
     if (session->cmd_data.cb) session->cmd_data.cb(session->cmd_data.retval, session->cmd_data.userp);
-
+    JDM_LEAVE_FUNCTION;
 //    commands_exec_end(sp_cmdbase, err, session);
 }
 
@@ -173,6 +181,7 @@ session_return(struct sp_session *session, enum sp_error err) {
 // session, otherwise we end download and disconnect.
 static void
 session_error(struct sp_session *session, enum sp_error err) {
+    JDM_ENTER_FUNCTION;
     static const char *err_c[] = {
             ERROR_ENTRY(SP_OK_OTHER),
             ERROR_ENTRY(SP_OK_WAIT),
@@ -189,13 +198,14 @@ session_error(struct sp_session *session, enum sp_error err) {
             ERROR_ENTRY(SP_ERR_TIMEOUT),
             ERROR_ENTRY(SP_ERR_TRACK_NOT_FOUND),
     };
-    sp_cb.logmsg("Session error: %s - %s (%d) (occurred before msg %d, queue %d)\n", err_c[err + 10], sp_errmsg, err,
+    JDM_WARN("Session error: %s - %s (%d) (occurred before msg %d, queue %d)", err_c[err + 10], sp_errmsg, err,
                  session->msg_type_next, session->msg_type_queued);
 
     session_return(session, err);
 
     if (!session->is_logged_in) {
         if (session->error_callback) session->error_callback(session, err, session->err_userp);
+        JDM_LEAVE_FUNCTION;
         return;
     }
 
@@ -204,18 +214,20 @@ session_error(struct sp_session *session, enum sp_error err) {
 
     ap_disconnect(&session->conn);
     if (session->error_callback) session->error_callback(session, err, session->err_userp);
+    JDM_LEAVE_FUNCTION;
 }
 
 // Called if an access point disconnects. Will clear current connection and
 // start a flow where the same request will be made to another access point.
 static void
 session_retry(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel = session->now_streaming_channel;
     enum sp_msg_type type = session->msg_type_last;
     const char *ap_address = ap_address_get(&session->conn);
     int ret;
 
-    sp_cb.logmsg("Retrying after disconnect (occurred at msg %d): %s\n", type, sp_errmsg);
+    JDM_WARN("Retrying after disconnect (occurred at msg %d): %s\n", type, sp_errmsg);
 
     channel_retry(channel);
 
@@ -231,6 +243,7 @@ session_retry(struct sp_session *session) {
     ret = request_make(type, session);
     if (ret < 0)
         session_error(session, ret);
+    JDM_LEAVE_FUNCTION;
 }
 
 /* ------------------------ Main sequence control --------------------------- */
@@ -239,6 +252,7 @@ session_retry(struct sp_session *session) {
 // done and should return to caller
 static void
 continue_cb(int fd, short what, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct sp_session *session = arg;
     enum sp_msg_type type = MSG_TYPE_NONE;
     int ret;
@@ -264,6 +278,7 @@ continue_cb(int fd, short what, void *arg) {
             session_error(session, ret);
     } else
         session_return(session, SP_OK_DONE); // All done, yay!
+    JDM_LEAVE_FUNCTION;
 }
 
 // This callback is triggered by response_cb when the message response handler
@@ -271,6 +286,7 @@ continue_cb(int fd, short what, void *arg) {
 // it will re-add the event.
 static void
 audio_write_cb(int fd, short what, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct sp_session *session = arg;
     struct sp_channel *channel = session->now_streaming_channel;
     int ret;
@@ -290,23 +306,28 @@ audio_write_cb(int fd, short what, void *arg) {
             goto error;
     }
 
+    JDM_LEAVE_FUNCTION;
     return;
 
     error:
+    JDM_LEAVE_FUNCTION;
     session_error(session, ret);
 }
 
 static void
 timeout_cb(int fd, short what, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct sp_session *session = arg;
 
     sp_errmsg = "Timeout waiting for Spotify response";
 
     session_error(session, SP_ERR_TIMEOUT);
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 response_cb(struct bufferevent *bev, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct sp_session *session = arg;
     struct sp_connection *conn = &session->conn;
     struct sp_channel *channel = session->now_streaming_channel;
@@ -358,6 +379,7 @@ response_cb(struct bufferevent *bev, void *arg) {
             goto error;
     }
 
+    JDM_LEAVE_FUNCTION;
     return;
 
     error:
@@ -365,10 +387,12 @@ response_cb(struct bufferevent *bev, void *arg) {
         session_retry(session);
     else
         session_error(session, ret);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 relogin(enum sp_msg_type type, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     int ret;
 
     ret = request_make(MSG_TYPE_CLIENT_HELLO, session);
@@ -379,14 +403,17 @@ relogin(enum sp_msg_type type, struct sp_session *session) {
     // the non-handshake message types. So queue the message until the handshake
     // is complete.
     session->msg_type_queued = type;
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static int
 request_make(enum sp_msg_type type, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_message msg;
     struct sp_connection *conn = &session->conn;
     struct sp_conn_callbacks cb = {session->evbase, response_cb, timeout_cb};
@@ -423,9 +450,11 @@ request_make(enum sp_msg_type type, struct sp_session *session) {
     session->msg_type_next = msg.type_next;
     session->response_handler = msg.response_handler;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -442,6 +471,7 @@ track_close(int ret, void *userp);
 // This command is async
 static int
 track_write(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     int ret;
     memset(&session->cmd_data, 0, sizeof(session->cmd_data));
@@ -456,16 +486,19 @@ track_write(struct sp_session *session) {
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
-    sp_cb.logmsg("Error %d: %s", ret, sp_errmsg);
+    JDM_ERROR("Error %d: %s", ret, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
 static int
 track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     int ret;
     struct track_pause_close_wrapper *wrapper = NULL;
@@ -493,16 +526,19 @@ track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
     channel_pause(channel);
     session->msg_type_next = MSG_TYPE_NONE;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     free(wrapper);
     memset(&session->cmd_data, 0, sizeof(session->cmd_data));
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
 static int
 track_seek(struct cmd_data *cmd_data, struct sp_session *session, size_t seek_pos) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     int ret;
     memcpy(&session->cmd_data, cmd_data, sizeof(*cmd_data));
@@ -521,14 +557,17 @@ track_seek(struct cmd_data *cmd_data, struct sp_session *session, size_t seek_po
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
 void
 track_close(int ret, void *userp) {
+    JDM_ENTER_FUNCTION;
     struct track_pause_close_wrapper *wrapper = (struct track_pause_close_wrapper*) userp;
     struct sp_session *session = wrapper->session;
 
@@ -538,10 +577,12 @@ track_close(int ret, void *userp) {
 
     if (wrapper->orig.cb) wrapper->orig.cb(ret, wrapper->orig.userp);
     free(wrapper);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 media_open(struct sp_session *session, const char *path, struct cmd_data *cmd_data) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel = NULL;
     enum sp_msg_type type;
     int ret;
@@ -578,6 +619,7 @@ media_open(struct sp_session *session, const char *path, struct cmd_data *cmd_da
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
@@ -585,7 +627,7 @@ media_open(struct sp_session *session, const char *path, struct cmd_data *cmd_da
         session->now_streaming_channel = NULL;
         channel_free(channel);
     }
-
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
@@ -593,6 +635,7 @@ static int
 login(struct sp_session **session, struct cmd_data *cmd, const char *username, const char *password,
       const char *stored_cred, size_t stored_cred_len, const char *token, size_t token_len,
       struct event_base *evbase) {
+    JDM_ENTER_FUNCTION;
     int ret;
 
     ret = session_new(session, continue_cb, username, password, stored_cred, stored_cred_len, token, evbase);
@@ -604,16 +647,19 @@ login(struct sp_session **session, struct cmd_data *cmd, const char *username, c
     if (ret < 0)
         goto error;
 
+    JDM_LEAVE_FUNCTION;
     return 0; // Pending command_exec_sync, i.e. response from Spotify
 
     error:
     session_cleanup(*session);
 
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
 static int
 logout(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     int ret;
     memset(&session->cmd_data, 0, sizeof(session->cmd_data));
 
@@ -624,11 +670,13 @@ logout(struct sp_session *session) {
     session_cleanup(session);
 
     error:
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
 static int
 bitrate_set(struct sp_session *session, enum sp_bitrates bitrate) {
+    JDM_ENTER_FUNCTION;
     int ret;
     memset(&session->cmd_data, 0, sizeof(session->cmd_data));
 
@@ -642,6 +690,7 @@ bitrate_set(struct sp_session *session, enum sp_bitrates bitrate) {
     session->bitrate_preferred = bitrate;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -739,6 +788,7 @@ librespotc_last_errmsg(void) {
 
 static void
 system_info_set(struct sp_sysinfo *si_out, struct sp_sysinfo *si_user) {
+    JDM_ENTER_FUNCTION;
     memcpy(si_out, si_user, sizeof(struct sp_sysinfo));
 
     if (si_out->client_name[9] == '\0')
@@ -747,10 +797,12 @@ system_info_set(struct sp_sysinfo *si_out, struct sp_sysinfo *si_user) {
         snprintf(si_out->client_version, sizeof(si_out->client_version), SP_CLIENT_VERSION_DEFAULT);
     if (si_out->client_build_id[9] == '\0')
         snprintf(si_out->client_build_id, sizeof(si_out->client_build_id), SP_CLIENT_BUILD_ID_DEFAULT);
+    JDM_LEAVE_FUNCTION;
 }
 
 int
 librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks) {
+    JDM_ENTER_FUNCTION;
     int ret;
 
     if (sp_initialized)
@@ -763,18 +815,22 @@ librespotc_init(struct sp_sysinfo *sysinfo, struct sp_callbacks *callbacks) {
     connection_init_lock();
     crypto_init();
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     librespotc_deinit();
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 void
 librespotc_deinit() {
+    JDM_ENTER_FUNCTION;
     sp_initialized = false;
     memset(&sp_cb, 0, sizeof(struct sp_callbacks));
     connection_free_lock();
+    JDM_LEAVE_FUNCTION;
 }
 
 int

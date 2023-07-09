@@ -21,3 +21,6 @@ target_link_libraries(smp_backend pthread)
 target_link_libraries(smp_backend librespot_c)
 target_link_libraries(smp_backend ${OPENSSL_LIBRARIES})
 target_link_libraries(smp_backend rt)
+
+add_subdirectory(libs/jdm)
+target_link_libraries(smp_backend jdm)

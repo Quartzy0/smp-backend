@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 
 #include <pthread.h>
+#include <jdm.h>
 
 #ifdef HAVE_SYS_UTSNAME_H
 # include <sys/utsname.h>
@@ -95,6 +96,7 @@ debug_mock_response(struct sp_message *msg, struct sp_connection *conn)
 void
 connection_init_lock(){
     if (lock_init) return;
+    JDM_ENTER_FUNCTION;
     lock_init = true;
     pthread_rwlockattr_t attr;
     pthread_rwlockattr_init(&attr);
@@ -102,15 +104,18 @@ connection_init_lock(){
     pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
 #endif
     pthread_rwlock_init(&ap_cache_lock, &attr);
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 connection_free_lock(){
     if (!lock_init) return;
+    JDM_ENTER_FUNCTION;
     lock_init = false;
     pthread_rwlock_destroy(&ap_cache_lock);
     free(ap_cache);
     ap_cache = NULL;
+    JDM_LEAVE_FUNCTION;
 }
 
 #ifdef HAVE_SYS_UTSNAME_H
@@ -186,6 +191,7 @@ format_is_preferred(AudioFile *a, AudioFile *b, enum sp_bitrates bitrate_preferr
 
 int
 file_select(uint8_t *out, size_t out_len, Track *track, enum sp_bitrates bitrate_preferred) {
+    JDM_ENTER_FUNCTION;
     AudioFile *selected = NULL;
     AudioFile *file;
     int i;
@@ -200,11 +206,14 @@ file_select(uint8_t *out, size_t out_len, Track *track, enum sp_bitrates bitrate
             selected = file;
     }
 
-    if (!selected)
+    if (!selected){
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     memcpy(out, selected->file_id.data, selected->file_id.len);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -223,6 +232,7 @@ reverse_find(const char *str, char q, int len){
 // it matches "avoid", i.e. an access point that previously failed)
 static int
 ap_resolve(char **address, unsigned short *port, const char *avoid) {
+    JDM_ENTER_FUNCTION;
     char *body = NULL;
     int ret;
 
@@ -278,7 +288,7 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
         address_begin++;
         ap_cache[i].address = strndup(address_begin, sep-address_begin);
         ap_cache[i].port = (uint16_t) strtol(sep+1, NULL, 10);
-        printf("Cached endpoint '%s:%d'\n", ap_cache[i].address, ap_cache[i].port);
+        JDM_TRACE("Cached endpoint '%s:%d'", ap_cache[i].address, ap_cache[i].port);
 
         if (!*address && (!avoid || strcmp(avoid, ap_cache[i].address) != 0)){
             *address = ap_cache[i].address;
@@ -290,11 +300,13 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
 
     pthread_rwlock_unlock(&ap_cache_lock);
     free(body);
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     pthread_rwlock_unlock(&ap_cache_lock);
     free(body);
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -302,6 +314,7 @@ static void
 connection_clear(struct sp_connection *conn) {
     if (!conn)
         return;
+    JDM_ENTER_FUNCTION;
 
     if (conn->response_bev){
         bufferevent_free(conn->response_bev);
@@ -327,10 +340,12 @@ connection_clear(struct sp_connection *conn) {
 
     memset(conn, 0, sizeof(struct sp_connection));
 //    conn->response_fd = -1;
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 ap_disconnect(struct sp_connection *conn) {
+    JDM_ENTER_FUNCTION;
     if (conn->is_connected){
 //        sp_cb.tcp_disconnect(conn->response_fd);
         bufferevent_free(conn->response_bev);
@@ -338,20 +353,24 @@ ap_disconnect(struct sp_connection *conn) {
     }
 
     connection_clear(conn);
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 connection_idle_cb(int fd, short what, void *arg) {
     struct sp_connection *conn = arg;
+    JDM_ENTER_FUNCTION;
 
     ap_disconnect(conn);
 
-    sp_cb.logmsg("Connection is idle, auto-disconnected\n");
+    JDM_TRACE("Connection is idle, auto-disconnected");
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn_callbacks *cb, void *response_cb_arg) {
 //    int response_fd;
+    JDM_ENTER_FUNCTION;
     int ret;
 
     if (!conn->ap_address || !conn->ap_port) {
@@ -390,8 +409,6 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
 //    conn->incoming = evbuffer_new();
 
     crypto_keys_set(&conn->keys);
-    conn->encrypt.logmsg = sp_cb.logmsg;
-    conn->decrypt.logmsg = sp_cb.logmsg;
 
     //event_add(conn->response_ev, NULL);
 
@@ -400,12 +417,14 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 enum sp_error
 ap_connect(struct sp_connection *conn, enum sp_msg_type type, time_t *cooldown_ts, const char *ap_avoid,
            struct sp_conn_callbacks *cb, void *cb_arg) {
+    JDM_ENTER_FUNCTION;
     int ret;
     time_t now;
 
@@ -426,13 +445,17 @@ ap_connect(struct sp_connection *conn, enum sp_msg_type type, time_t *cooldown_t
             RETURN_ERROR(ret, sp_errmsg);
     }
 
-    if (msg_is_handshake(type) || conn->handshake_completed)
+    if (msg_is_handshake(type) || conn->handshake_completed){
+        JDM_LEAVE_FUNCTION;
         return SP_OK_DONE; // Proceed right away
+    }
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_WAIT; // Caller must login again
 
     error:
     ap_disconnect(conn);
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -446,6 +469,7 @@ ap_address_get(struct sp_connection *conn) {
 static ssize_t
 packet_make_encrypted(uint8_t *out, size_t out_len, uint8_t cmd, const uint8_t *payload, size_t payload_len,
                       struct crypto_cipher *cipher) {
+    JDM_ENTER_FUNCTION;
     uint16_t be;
     size_t plain_len;
     ssize_t pkt_len;
@@ -470,14 +494,17 @@ packet_make_encrypted(uint8_t *out, size_t out_len, uint8_t cmd, const uint8_t *
     if (pkt_len < 9)
         goto error;
 
+    JDM_LEAVE_FUNCTION;
     return pkt_len;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return -1;
 }
 
 static ssize_t
 packet_make_plain(uint8_t *out, size_t out_len, uint8_t *protobuf, size_t protobuf_len, bool add_version_header) {
+    JDM_ENTER_FUNCTION;
     const uint8_t version_header[] = {0x00, 0x04};
     size_t header_len;
     ssize_t len;
@@ -486,8 +513,10 @@ packet_make_plain(uint8_t *out, size_t out_len, uint8_t *protobuf, size_t protob
     header_len = add_version_header ? sizeof(be) + sizeof(version_header) : sizeof(be);
 
     len = header_len + protobuf_len;
-    if (len > out_len)
+    if (len > out_len){
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     if (add_version_header)
         memcpy(out, version_header, sizeof(version_header));
@@ -496,6 +525,7 @@ packet_make_plain(uint8_t *out, size_t out_len, uint8_t *protobuf, size_t protob
     memcpy(out + header_len - sizeof(be), &be, sizeof(be)); // Last bytes of the header is the length
     memcpy(out + header_len, protobuf, protobuf_len);
 
+    JDM_LEAVE_FUNCTION;
     return len;
 }
 
@@ -508,6 +538,7 @@ mercury_free(struct sp_mercury *mercury, int content_only) {
 
     if (!mercury)
         return;
+    JDM_ENTER_FUNCTION;
 
     free(mercury->uri);
     free(mercury->method);
@@ -524,10 +555,12 @@ mercury_free(struct sp_mercury *mercury, int content_only) {
         memset(mercury, 0, sizeof(struct sp_mercury));
     else
         free(mercury);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 mercury_parse(struct sp_mercury *mercury, uint8_t *payload, size_t payload_len) {
+    JDM_ENTER_FUNCTION;
     Header *header;
     uint8_t *ptr;
     uint16_t be;
@@ -607,10 +640,12 @@ mercury_parse(struct sp_mercury *mercury, uint8_t *payload, size_t payload_len) 
 
     assert(ptr == payload + required_len);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error_length:
     mercury_free(mercury, 1);
+    JDM_LEAVE_FUNCTION;
     return -1;
 }
 
@@ -619,6 +654,7 @@ mercury_parse(struct sp_mercury *mercury, uint8_t *payload, size_t payload_len) 
 
 static enum sp_error
 response_client_hello(uint8_t *msg, size_t msg_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_connection *conn = &session->conn;
     APResponseMessage *apresponse;
     size_t header_len = 4; // TODO make a define
@@ -644,14 +680,17 @@ response_client_hello(uint8_t *msg, size_t msg_len, struct sp_session *session) 
 
     conn->handshake_completed = true;
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static enum sp_error
 response_apwelcome(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     APWelcome *apwelcome;
     int ret;
 
@@ -673,19 +712,23 @@ response_apwelcome(uint8_t *payload, size_t payload_len, struct sp_session *sess
 
     apwelcome__free_unpacked(apwelcome, NULL);
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static enum sp_error
 response_aplogin_failed(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     APLoginFailed *aplogin_failed;
 
     aplogin_failed = aplogin_failed__unpack(NULL, payload_len, payload);
     if (!aplogin_failed) {
         sp_errmsg = "Could not unpack login failure from access point";
+        JDM_LEAVE_FUNCTION;
         return SP_ERR_LOGINFAILED;
     }
 
@@ -700,11 +743,13 @@ response_aplogin_failed(uint8_t *payload, size_t payload_len, struct sp_session 
 
     aplogin_failed__free_unpacked(aplogin_failed, NULL);
 
+    JDM_LEAVE_FUNCTION;
     return SP_ERR_LOGINFAILED;
 }
 
 static enum sp_error
 response_chunk_res(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     uint16_t channel_id;
     int ret;
@@ -721,14 +766,17 @@ response_chunk_res(uint8_t *payload, size_t payload_len, struct sp_session *sess
 
 //  sp_cb.logmsg("EOC is %d, data is %zu, buflen is %zu\n", channel->file.end_of_chunk, channel->body.data_len, evbuffer_get_length(channel->audio_buf));
 
+    JDM_LEAVE_FUNCTION;
     return channel->file.end_of_chunk ? SP_OK_DATA : SP_OK_OTHER;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static enum sp_error
 response_aes_key(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     const char *errmsg;
     uint32_t be32;
@@ -753,9 +801,11 @@ response_aes_key(uint8_t *payload, size_t payload_len, struct sp_session *sessio
     if (ret < 0)
         RETURN_ERROR(SP_ERR_DECRYPTION, errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -779,6 +829,7 @@ response_channel_error(uint8_t *payload, size_t payload_len, struct sp_session *
 
 static enum sp_error
 response_mercury_req(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_mercury mercury = {0};
     struct sp_channel *channel;
     uint32_t channel_id;
@@ -787,6 +838,7 @@ response_mercury_req(uint8_t *payload, size_t payload_len, struct sp_session *se
     ret = mercury_parse(&mercury, payload, payload_len);
     if (ret < 0) {
         sp_errmsg = "Could not parse message from Spotify";
+        JDM_LEAVE_FUNCTION;
         return SP_ERR_INVALID;
     }
 
@@ -805,22 +857,27 @@ response_mercury_req(uint8_t *payload, size_t payload_len, struct sp_session *se
 
     mercury_free(&mercury, 1);
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE; // Continue to get AES key
 
     error:
     mercury_free(&mercury, 1);
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static enum sp_error
 response_ping(uint8_t *payload, size_t payload_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     msg_pong(session);
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_OTHER;
 }
 
 static enum sp_error
 response_generic(uint8_t *msg, size_t msg_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     enum sp_cmd_type cmd;
     uint8_t *payload;
     size_t payload_len;
@@ -867,11 +924,13 @@ response_generic(uint8_t *msg, size_t msg_len, struct sp_session *session) {
             ret = SP_OK_OTHER;
     }
 
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static enum sp_error
 msg_read_one(uint8_t **out, size_t *out_len, uint8_t *in, size_t in_len, struct sp_connection *conn) {
+    JDM_ENTER_FUNCTION;
     uint32_t be32;
     ssize_t msg_len;
     int ret;
@@ -897,18 +956,24 @@ msg_read_one(uint8_t **out, size_t *out_len, uint8_t *in, size_t in_len, struct 
         msg_len = crypto_decrypt(in, in_len, &conn->decrypt);
         if (msg_len < 0)
             RETURN_ERROR(SP_ERR_DECRYPTION, "Decryption error");
-        if (msg_len == 0)
+        if (msg_len == 0){
+            JDM_LEAVE_FUNCTION;
             return SP_OK_WAIT;
+        }
     } else {
-        if (in_len < sizeof(be32))
+        if (in_len < sizeof(be32)){
+            JDM_LEAVE_FUNCTION;
             return SP_OK_WAIT; // Wait for more data, size header is incomplete
+        }
 
         memcpy(&be32, in, sizeof(be32));
         msg_len = be32toh(be32);
         if (msg_len < 0)
             RETURN_ERROR(SP_ERR_INVALID, "Invalid message length");
-        if (msg_len > in_len)
+        if (msg_len > in_len){
+            JDM_LEAVE_FUNCTION;
             return SP_OK_WAIT;
+        }
 
         if (!conn->handshake_completed)
             evbuffer_add(conn->handshake_packets, in, msg_len);
@@ -919,14 +984,17 @@ msg_read_one(uint8_t **out, size_t *out_len, uint8_t *in, size_t in_len, struct 
     *out_len = msg_len;
     evbuffer_remove(bufferevent_get_input(conn->response_bev), *out, msg_len);
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 enum sp_error
 response_read(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_connection *conn = &session->conn;
     struct evbuffer *data = bufferevent_get_input(conn->response_bev);
     uint8_t *in;
@@ -942,11 +1010,6 @@ response_read(struct sp_session *session) {
     if (ret != SP_OK_DONE)
         goto error;
 
-    if (msg_len < 128)
-        sp_cb.hexdump("Received message\n", msg, msg_len);
-    else
-        sp_cb.hexdump("Received message (truncated)\n", msg, 128);
-
     if (!session->response_handler)
         RETURN_ERROR(SP_ERR_INVALID, "Unexpected response from Spotify, aborting");
 
@@ -957,9 +1020,11 @@ response_read(struct sp_session *session) {
     ret = session->response_handler(msg, msg_len, session);
     free(msg);
 
+    JDM_LEAVE_FUNCTION;
     return ret;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -969,6 +1034,7 @@ response_read(struct sp_session *session) {
 // This message is constructed like librespot does it, see handshake.rs
 static ssize_t
 msg_make_client_hello(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     ClientHello client_hello = CLIENT_HELLO__INIT;
     BuildInfo build_info = BUILD_INFO__INIT;
     LoginCryptoHelloUnion login_crypto = LOGIN_CRYPTO_HELLO_UNION__INIT;
@@ -999,16 +1065,20 @@ msg_make_client_hello(uint8_t *out, size_t out_len, struct sp_session *session) 
     client_hello.padding.data = padding;
 
     len = client_hello__get_packed_size(&client_hello);
-    if (len > out_len)
+    if (len > out_len){
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     client_hello__pack(&client_hello, out);
 
+    JDM_LEAVE_FUNCTION;
     return len;
 }
 
 static int
 client_response_crypto(uint8_t **challenge, size_t *challenge_len, struct sp_connection *conn) {
+    JDM_ENTER_FUNCTION;
     uint8_t *packets;
     size_t packets_len;
     int ret;
@@ -1025,11 +1095,13 @@ client_response_crypto(uint8_t **challenge, size_t *challenge_len, struct sp_con
 
     free(packets);
 
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static ssize_t
 msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     ClientResponsePlaintext client_response = CLIENT_RESPONSE_PLAINTEXT__INIT;
     LoginCryptoResponseUnion login_crypto_response = LOGIN_CRYPTO_RESPONSE_UNION__INIT;
     LoginCryptoDiffieHellmanResponse diffie_hellman = LOGIN_CRYPTO_DIFFIE_HELLMAN_RESPONSE__INIT;
@@ -1039,8 +1111,10 @@ msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_sessi
     int ret;
 
     ret = client_response_crypto(&challenge, &challenge_len, &session->conn);
-    if (ret < 0)
+    if (ret < 0){
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     diffie_hellman.hmac.len = challenge_len;
     diffie_hellman.hmac.data = challenge;
@@ -1052,17 +1126,20 @@ msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_sessi
     len = client_response_plaintext__get_packed_size(&client_response);
     if (len > out_len) {
         free(challenge);
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
     client_response_plaintext__pack(&client_response, out);
 
     free(challenge);
+    JDM_LEAVE_FUNCTION;
     return len;
 }
 
 static ssize_t
 msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     ClientResponseEncrypted client_response = CLIENT_RESPONSE_ENCRYPTED__INIT;
     LoginCredentials login_credentials = LOGIN_CREDENTIALS__INIT;
     SystemInfo system_info = SYSTEM_INFO__INIT;
@@ -1085,8 +1162,10 @@ msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_sessi
         login_credentials.typ = AUTHENTICATION_TYPE__AUTHENTICATION_USER_PASS;
         login_credentials.auth_data.len = strlen(session->credentials.password);
         login_credentials.auth_data.data = (unsigned char *) session->credentials.password;
-    } else
+    } else {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     snprintf(system_information_string, sizeof(system_information_string), "%s_%s_%s",
              sp_sysinfo.client_name, sp_sysinfo.client_version, sp_sysinfo.client_build_id);
@@ -1104,11 +1183,14 @@ msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_sessi
     client_response.version_string = version_string;
 
     len = client_response_encrypted__get_packed_size(&client_response);
-    if (len > out_len)
+    if (len > out_len) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     client_response_encrypted__pack(&client_response, out);
 
+    JDM_LEAVE_FUNCTION;
     return len;
 }
 
@@ -1118,6 +1200,7 @@ msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_sessi
 // also access various metadata normally fetched by external players (tracks metadata, playlists, artists, etc).
 static ssize_t
 msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
+    JDM_ENTER_FUNCTION;
     Header header = HEADER__INIT;
     uint8_t *ptr;
     uint16_t be;
@@ -1130,8 +1213,10 @@ msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
 
     prefix_len = sizeof(be) + sizeof(be64) + sizeof(flags) + sizeof(be) + sizeof(be);
 
-    if (prefix_len > out_len)
+    if (prefix_len > out_len) {
+        JDM_LEAVE_FUNCTION;
         return -1; // Buffer too small
+    }
 
     ptr = out;
 
@@ -1155,8 +1240,10 @@ msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
     header.content_type = mercury->content_type;
 
     header_len = header__get_packed_size(&header);
-    if (header_len + prefix_len > out_len)
+    if (header_len + prefix_len > out_len) {
+        JDM_LEAVE_FUNCTION;
         return -1; // Buffer too small
+    }
 
     be = htobe16(header_len);
     memcpy(ptr, &be, sizeof(be)); // prefix_len += sizeof(be)
@@ -1183,11 +1270,13 @@ msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
 
     assert(ptr - out == header_len + prefix_len + body_len);
 
+    JDM_LEAVE_FUNCTION;
     return header_len + prefix_len + body_len;
 }
 
 static ssize_t
 msg_make_mercury_track_get(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_mercury mercury = {0};
     struct sp_channel *channel = session->now_streaming_channel;
     char uri[256];
@@ -1206,11 +1295,13 @@ msg_make_mercury_track_get(uint8_t *out, size_t out_len, struct sp_session *sess
     mercury.seq = channel->id;
     mercury.uri = uri;
 
+    JDM_LEAVE_FUNCTION;
     return msg_make_mercury_req(out, out_len, &mercury);
 }
 
 static ssize_t
 msg_make_mercury_episode_get(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_mercury mercury = {0};
     struct sp_channel *channel = session->now_streaming_channel;
     char uri[256];
@@ -1229,11 +1320,13 @@ msg_make_mercury_episode_get(uint8_t *out, size_t out_len, struct sp_session *se
     mercury.seq = channel->id;
     mercury.uri = uri;
 
+    JDM_LEAVE_FUNCTION;
     return msg_make_mercury_req(out, out_len, &mercury);
 }
 
 static ssize_t
 msg_make_audio_key_get(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel = session->now_streaming_channel;
     size_t required_len;
     uint32_t be32;
@@ -1242,8 +1335,10 @@ msg_make_audio_key_get(uint8_t *out, size_t out_len, struct sp_session *session)
 
     required_len = sizeof(channel->file.id) + sizeof(channel->file.media_id) + sizeof(be32) + sizeof(be);
 
-    if (required_len > out_len)
+    if (required_len > out_len) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     ptr = out;
 
@@ -1261,25 +1356,31 @@ msg_make_audio_key_get(uint8_t *out, size_t out_len, struct sp_session *session)
     memcpy(ptr, &be, sizeof(be));
     ptr += sizeof(be);
 
+    JDM_LEAVE_FUNCTION;
     return required_len;
 }
 
 static ssize_t
 msg_make_chunk_request(uint8_t *out, size_t out_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel = session->now_streaming_channel;
     uint8_t *ptr;
     uint16_t be;
     uint32_t be32;
     size_t required_len;
 
-    if (!channel)
+    if (!channel) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     ptr = out;
 
     required_len = 3 * sizeof(be) + sizeof(channel->file.id) + 5 * sizeof(be32);
-    if (required_len > out_len)
+    if (required_len > out_len) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     be = htobe16(channel->id);
     memcpy(ptr, &be, sizeof(be));
@@ -1319,6 +1420,7 @@ msg_make_chunk_request(uint8_t *out, size_t out_len, struct sp_session *session)
     assert(required_len == ptr - out);
     assert(required_len == 46);
 
+    JDM_LEAVE_FUNCTION;
     return required_len;
 }
 
@@ -1331,6 +1433,7 @@ msg_is_handshake(enum sp_msg_type type) {
 
 int
 msg_make(struct sp_message *msg, enum sp_msg_type type, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     memset(msg, 0, sizeof(struct sp_message));
     msg->type = type;
 
@@ -1389,11 +1492,13 @@ msg_make(struct sp_message *msg, enum sp_msg_type type, struct sp_session *sessi
             msg->len = -1;
     }
 
+    JDM_LEAVE_FUNCTION;
     return (msg->len < 0) ? -1 : 0;
 }
 
 int
 msg_send(struct sp_message *msg, struct sp_connection *conn) {
+    JDM_ENTER_FUNCTION;
     uint8_t pkt[4096];
     ssize_t pkt_len;
     int ret;
@@ -1428,14 +1533,17 @@ msg_send(struct sp_message *msg, struct sp_connection *conn) {
     // Reset the disconnect timer
     event_add(conn->idle_ev, &sp_idle_tv);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 int
 msg_pong(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_message msg;
     int ret;
 
@@ -1447,8 +1555,10 @@ msg_pong(struct sp_session *session) {
     if (ret < 0)
         RETURN_ERROR(ret, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }

@@ -1,10 +1,10 @@
 #include <stdio.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <assert.h>
 #include <ctype.h> // for isdigit(), isupper(), islower()
+#include <jdm.h>
 
 #include "librespot-c-internal.h" // For endian compat functions
 #include "crypto.h"
@@ -59,11 +59,6 @@ static const uint8_t prime_bytes[] =
                 0xf4, 0x4c, 0x42, 0xe9, 0xa6, 0x3a, 0x36, 0x20, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
         };
 
-static void
-crypto_log(const char *fmt, ...) {
-    return;
-}
-
 /*
 static void
 crypto_hexdump(const char *msg, uint8_t *mem, size_t len)
@@ -73,19 +68,22 @@ crypto_hexdump(const char *msg, uint8_t *mem, size_t len)
 */
 
 void crypto_init() {
+    JDM_ENTER_FUNCTION;
     if (!gcry_control(GCRYCTL_INITIALIZATION_FINISHED_P)) {
         const char *ret;
         if (!(ret = gcry_check_version("1.5.4"))){
-            abort();
+            JDM_FATAL("libgcrypt version is below 1.5.4!");
         }
-        printf("libgcrypt version %s\n", ret);
+        JDM_TRACE("libgcrypt version %s", ret);
         gcry_control(GCRYCTL_DISABLE_SECMEM, 0);
         gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 int
 crypto_keys_set(struct crypto_keys *keys) {
+    JDM_ENTER_FUNCTION;
     bnum generator = NULL;
     bnum prime = NULL;
     bnum private_key = NULL;
@@ -111,6 +109,7 @@ crypto_keys_set(struct crypto_keys *keys) {
     bnum_free(private_key);
     bnum_free(public_key);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -118,6 +117,7 @@ void
 crypto_shared_secret(uint8_t **shared_secret_bytes, size_t *shared_secret_bytes_len,
                      uint8_t *private_key_bytes, size_t private_key_bytes_len,
                      uint8_t *server_key_bytes, size_t server_key_bytes_len) {
+    JDM_ENTER_FUNCTION;
     bnum private_key;
     bnum server_key;
     bnum prime;
@@ -138,6 +138,7 @@ crypto_shared_secret(uint8_t **shared_secret_bytes, size_t *shared_secret_bytes_
     bnum_free(server_key);
     bnum_free(prime);
     bnum_free(shared_secret);
+    JDM_LEAVE_FUNCTION;
 }
 
 // Calculates challenge and send/receive keys. The challenge is allocated,
@@ -148,6 +149,7 @@ crypto_challenge(uint8_t **challenge, size_t *challenge_len,
                  uint8_t *recv_key, size_t recv_key_len,
                  uint8_t *packets, size_t packets_len,
                  uint8_t *shared_secret, size_t shared_secret_len) {
+    JDM_ENTER_FUNCTION;
     gcry_mac_hd_t hd = NULL;
     uint8_t data[0x64];
     uint8_t i;
@@ -193,11 +195,13 @@ crypto_challenge(uint8_t **challenge, size_t *challenge_len,
     gcry_mac_read(hd, *challenge, challenge_len);
     gcry_mac_close(hd);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     if (hd)
         gcry_mac_close(hd);
+    JDM_LEAVE_FUNCTION;
     return -1;
 }
 
@@ -205,13 +209,16 @@ crypto_challenge(uint8_t **challenge, size_t *challenge_len,
 // can be added
 ssize_t
 crypto_encrypt(uint8_t *buf, size_t buf_len, size_t plain_len, struct crypto_cipher *cipher) {
+    JDM_ENTER_FUNCTION;
     uint32_t nonce;
     uint8_t mac[4];
     size_t encrypted_len;
 
     encrypted_len = plain_len + sizeof(mac);
-    if (encrypted_len > buf_len)
+    if (encrypted_len > buf_len){
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     shn_key(&cipher->shannon, cipher->key, sizeof(cipher->key));
 
@@ -225,6 +232,7 @@ crypto_encrypt(uint8_t *buf, size_t buf_len, size_t plain_len, struct crypto_cip
 
     cipher->nonce++;
 
+    JDM_LEAVE_FUNCTION;
     return encrypted_len;
 }
 
@@ -241,18 +249,20 @@ payload_len_get(uint8_t *header) {
 // whole packet was decrypted). Zero means not enough data for a packet.
 ssize_t
 crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *cipher) {
+    JDM_ENTER_FUNCTION;
     uint32_t nonce;
     uint8_t mac[4];
     size_t header_len = sizeof(cipher->last_header);
     size_t payload_len;
 
-    crypto_log("Decrypting %zu bytes with nonce %u\n", encrypted_len, cipher->nonce);
+    JDM_DEBUG("Decrypting %zu bytes with nonce %u", encrypted_len, cipher->nonce);
 //  crypto_hexdump("Key\n", cipher->key, sizeof(cipher->key));
 //  crypto_hexdump("Encrypted\n", encrypted, encrypted_len);
 
     // In case we didn't even receive the basics, header and mac, then return.
     if (encrypted_len < header_len + sizeof(mac)) {
-        crypto_log("Waiting for %zu header bytes, have %zu\n", header_len + sizeof(mac), encrypted_len);
+        JDM_DEBUG("Waiting for %zu header bytes, have %zu", header_len + sizeof(mac), encrypted_len);
+        JDM_LEAVE_FUNCTION;
         return 0;
     }
 
@@ -281,7 +291,8 @@ crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *c
 
     // Not enough data for decrypting the entire packet
     if (payload_len > encrypted_len) {
-        crypto_log("Waiting for %zu payload bytes, have %zu\n", payload_len, encrypted_len);
+        JDM_DEBUG("Waiting for %zu payload bytes, have %zu", payload_len, encrypted_len);
+        JDM_LEAVE_FUNCTION;
         return 0;
     }
 
@@ -293,14 +304,16 @@ crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *c
 //  crypto_hexdump("mac in\n", encrypted + payload_len, sizeof(mac));
 //  crypto_hexdump("mac our\n", mac, sizeof(mac));
     if (memcmp(mac, encrypted + payload_len, sizeof(mac)) != 0) {
-        crypto_log("MAC VALIDATION FAILED\n"); // TODO
+        JDM_DEBUG("MAC VALIDATION FAILED"); // TODO
         memset(cipher->last_header, 0, header_len);
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
     cipher->nonce++;
     memset(cipher->last_header, 0, header_len);
 
+    JDM_LEAVE_FUNCTION;
     return header_len + payload_len + sizeof(mac);
 }
 
@@ -315,6 +328,7 @@ crypto_aes_free(struct crypto_aes_cipher *cipher) {
 int
 crypto_aes_new(struct crypto_aes_cipher *cipher, uint8_t *key, size_t key_len, uint8_t *iv, size_t iv_len,
                const char **errmsg) {
+    JDM_ENTER_FUNCTION;
     gcry_error_t err;
 
     err = gcry_cipher_open(&cipher->aes, GCRY_CIPHER_AES128, GCRY_CIPHER_MODE_CTR, 0);
@@ -337,15 +351,18 @@ crypto_aes_new(struct crypto_aes_cipher *cipher, uint8_t *key, size_t key_len, u
 
     memcpy(cipher->aes_iv, iv, iv_len);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     crypto_aes_free(cipher);
+    JDM_LEAVE_FUNCTION;
     return -1;
 }
 
 int
 crypto_aes_seek(struct crypto_aes_cipher *cipher, size_t seek, const char **errmsg) {
+    JDM_ENTER_FUNCTION;
     gcry_error_t err;
     uint64_t be64;
     uint64_t ctr;
@@ -372,6 +389,7 @@ crypto_aes_seek(struct crypto_aes_cipher *cipher, size_t seek, const char **errm
     err = gcry_cipher_setctr(cipher->aes, iv, iv_len);
     if (err) {
         *errmsg = "Could not set iv for AES 128 CTR";
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
@@ -380,22 +398,27 @@ crypto_aes_seek(struct crypto_aes_cipher *cipher, size_t seek, const char **errm
     err = gcry_cipher_decrypt(cipher->aes, iv, offset, NULL, 0);
     if (err) {
         *errmsg = "Error CTR offset while seeking";
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
 int
 crypto_aes_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_aes_cipher *cipher, const char **errmsg) {
+    JDM_ENTER_FUNCTION;
     gcry_error_t err;
 
     err = gcry_cipher_decrypt(cipher->aes, encrypted, encrypted_len, NULL, 0);
     if (err) {
         *errmsg = "Error CTR decrypting";
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -416,6 +439,7 @@ crypto_base62_digit(char c) {
 // (note that the function prefixes with zeroes)
 int
 crypto_base62_to_bin(uint8_t *out, size_t out_len, const char *in) {
+    JDM_ENTER_FUNCTION;
     uint8_t u8;
     bnum n;
     bnum base;
@@ -448,10 +472,12 @@ crypto_base62_to_bin(uint8_t *out, size_t out_len, const char *in) {
     bnum_free(n);
     bnum_free(base);
 
+    JDM_LEAVE_FUNCTION;
     return (int) out_len;
 
     error:
     bnum_free(n);
     bnum_free(base);
+    JDM_LEAVE_FUNCTION;
     return -1;
 }

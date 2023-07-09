@@ -14,6 +14,7 @@
 void
 write_error(int fd, enum error_type err, const char *msg) {
     if (fd == -1) return;
+    JDM_ENTER_FUNCTION;
     char data[1 + sizeof(size_t)];
     data[0] = err;
 
@@ -26,6 +27,7 @@ write_error(int fd, enum error_type err, const char *msg) {
         memset(&data[1], 0, sizeof(size_t));
         write(fd, data, sizeof(data));
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 size_t
@@ -97,8 +99,12 @@ sdir_ent_comprar(const void *a, const void *b){
 
 size_t
 read_dir_files(const char *path, size_t *files_size, size_t *files_len, struct sdir_ent **files){
+    JDM_ENTER_FUNCTION;
     DIR *dir = opendir(path);
-    if(!dir) return -1;
+    if(!dir) {
+        JDM_LEAVE_FUNCTION;
+        return -1;
+    }
 
     size_t total_size = 0;
 
@@ -130,7 +136,7 @@ read_dir_files(const char *path, size_t *files_size, size_t *files_len, struct s
             filename[path_len+1+namesize] = 0;
             if(path_len+1+namesize+1 > sizeof((*files)[*files_size].name)) {
                 total_size += file_stat.st_size;
-                fprintf(stderr, "Name of file was longer than 1024 characters! ('%s')\n", filename);
+                JDM_ERROR("Name of file was longer than 1024 characters! ('%s')", filename);
                 continue;
             }
 
@@ -144,12 +150,13 @@ read_dir_files(const char *path, size_t *files_size, size_t *files_len, struct s
     closedir(dir);
     free(filename);
 
+    JDM_LEAVE_FUNCTION;
     return total_size;
 }
 
 size_t
 delete_oldest_until_size_requirement(size_t size_requirement, ...) {
-
+    JDM_ENTER_FUNCTION;
     size_t files_size = 100, files_len = 0;
     struct sdir_ent *files = calloc(files_size, sizeof(*files));
     size_t total_size = 0;
@@ -170,7 +177,7 @@ delete_oldest_until_size_requirement(size_t size_requirement, ...) {
     if(files_size!=files_len){
         files_size = files_len;
         struct sdir_ent *tmp = realloc(files, files_size * sizeof(*tmp));
-        if(!tmp) perror("error when calling realloc()");
+        if(!tmp) JDM_ERROR("error when calling realloc(): %s", JDM_ERRNO_MESSAGE);
         files = tmp;
     }
     qsort(files, files_len, sizeof(*files), sdir_ent_comprar);
@@ -185,6 +192,7 @@ delete_oldest_until_size_requirement(size_t size_requirement, ...) {
         if(total_size<=size_requirement) break;
     }
     free(files);
+    JDM_LEAVE_FUNCTION;
     return deleted;
 }
 
@@ -195,8 +203,8 @@ delete_oldest_until_size_requirement(size_t size_requirement, ...) {
 #include <sys/param.h>
 #include <sys/sysctl.h>
 #else
-#include <unistd.h>
 #include <ctype.h>
+#include <sigsegv.h>
 
 #endif
 
@@ -233,4 +241,65 @@ is_valid_id(uint8_t *id) {
         if (!isalnum(id[i])) return false;
     }
     return true;
+}
+
+int error_message_hook(const char *thread_name, uint32_t stack_trace_count, const char *const *stack_trace,
+                       jdm_message_level level, uint32_t line, const char *file, const char *function,
+                       const char *message, void *param) {
+    switch (level) {
+        case JDM_MESSAGE_LEVEL_NONE:
+        case JDM_MESSAGE_LEVEL_DEBUG:
+        case JDM_MESSAGE_LEVEL_TRACE:
+        case JDM_MESSAGE_LEVEL_INFO:
+        case JDM_MESSAGE_LEVEL_WARN: {
+            printf("%s [%s] %s:%d %s: %s\n", jdm_message_level_str(level), thread_name, file, line, function, message);
+            break;
+        }
+        case JDM_MESSAGE_LEVEL_ERR:
+        case JDM_MESSAGE_LEVEL_CRIT: {
+            fprintf(stderr, "%s [%s] %s:%d %s: %s\n", jdm_message_level_str(level), thread_name, file, line, function, message);
+            for (size_t j = stack_trace_count - 1; j > 0; --j) {
+                fprintf(stderr, "\t^- %s\n", stack_trace[j]);
+            }
+            fprintf(stderr, "\t^- %s\n", stack_trace[0]);
+            break;
+        }
+    }
+    return 0;
+}
+
+void sigsegv_handler(int sig){
+    if (sig != SIGSEGV) return;
+
+    const char*const* stack_trace;
+    uint32_t stack_trace_count;
+    jdm_get_stacktrace(&stack_trace, &stack_trace_count);
+    const char *thread_name = jdm_get_thread_name();
+
+    static const char sigsegv_message_prefix[] = "Fatal [";
+    static const char sigsegv_message[] = "] SIGSEGV occurred. Exiting. Callstack:\n";
+    write(STDERR_FILENO, sigsegv_message_prefix, sizeof(sigsegv_message_prefix));
+    write(STDERR_FILENO, thread_name, strlen(thread_name));
+    write(STDERR_FILENO, sigsegv_message, sizeof(sigsegv_message));
+
+    static const char function_prefix[] = {'\t', '^', '-', ' '};
+    static const char newline = '\n';
+    for (uint32_t i = stack_trace_count-1; i > 0; --i) {
+        write(STDERR_FILENO, function_prefix, sizeof(function_prefix));
+        write(STDERR_FILENO, stack_trace[i], strlen(stack_trace[i]));
+        write(STDERR_FILENO, &newline, sizeof(newline));
+    }
+    write(STDERR_FILENO, function_prefix, sizeof(function_prefix));
+    write(STDERR_FILENO, stack_trace[0], strlen(stack_trace[0]));
+    write(STDERR_FILENO, &newline, sizeof(newline));
+    exit(EXIT_FAILURE);
+}
+
+int set_sigsegv_handler() {
+    struct sigaction action = {
+            .sa_handler = sigsegv_handler,
+            .sa_mask = SIGSEGV,
+            .sa_flags = 0
+    };
+    return sigaction(SIGSEGV, &action, NULL);
 }

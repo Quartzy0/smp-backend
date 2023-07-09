@@ -23,7 +23,7 @@ dispatch_all_queued_requests(struct http_connection_pool *pool);
 
 static void
 err_openssl(const char *func) {
-    fprintf(stderr, "%s failed:\n", func);
+    JDM_ERROR("%s failed:", func);
 
     /* This is the OpenSSL function that prints the contents of the
      * error stack to the specified file handle. */
@@ -34,6 +34,7 @@ err_openssl(const char *func) {
 
 /* See http://archives.seul.org/libevent/users/Jan-2013/msg00039.html */
 static int cert_verify_callback(X509_STORE_CTX *x509_ctx, void *arg) {
+    JDM_ENTER_FUNCTION;
     char cert_str[256];
     const char *host = (const char *) arg;
     const char *res_str = "X509_verify_cert failed";
@@ -78,16 +79,19 @@ static int cert_verify_callback(X509_STORE_CTX *x509_ctx, void *arg) {
                       cert_str, sizeof(cert_str));
 
     if (res == MatchFound) {
+        JDM_LEAVE_FUNCTION;
         return 1;
     } else {
-        printf("Got '%s' for hostname '%s' and certificate:\n%s\n",
+        JDM_WARN("Got '%s' for hostname '%s' and certificate: %s",
                res_str, host, cert_str);
+        JDM_LEAVE_FUNCTION;
         return 0;
     }
 }
 
 int
 http_init_ssl(SSL **ssl, SSL_CTX **ssl_ctx, char *host){
+    JDM_ENTER_FUNCTION;
     (*ssl_ctx) = SSL_CTX_new(SSLv23_method());
     if (!(*ssl_ctx)) {
         err_openssl("SSL_CTX_new");
@@ -108,6 +112,7 @@ http_init_ssl(SSL **ssl, SSL_CTX **ssl_ctx, char *host){
     (*ssl) = SSL_new((*ssl_ctx));
     if ((*ssl) == NULL) {
         err_openssl("SSL_new()");
+        JDM_LEAVE_FUNCTION;
         return -1;
     }
 
@@ -115,11 +120,13 @@ http_init_ssl(SSL **ssl, SSL_CTX **ssl_ctx, char *host){
     // Set hostname for SNI extension
     SSL_set_tlsext_host_name((*ssl), host);
 #endif
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
 int
 http_init(struct http_connection_pool *pool){
+    JDM_ENTER_FUNCTION;
     memset(pool->connections, 0, sizeof(pool->connections));
     // Initialize OpenSSL
 #if (OPENSSL_VERSION_NUMBER < 0x10100000L) || \
@@ -135,6 +142,7 @@ http_init(struct http_connection_pool *pool){
     // End initializing OpenSSL
 
     vec_init(&pool->queued_requests);
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -147,6 +155,7 @@ http_connection_close(struct evhttp_connection *connection, void *arg);
 void
 make_token_request(struct http_connection_pool *pool){
     if (pool->fetching_token) return;
+    JDM_ENTER_FUNCTION;
     pool->fetching_token = true;
     if (!pool->token_connection.active) {
         pool->token_connection.bev = bufferevent_openssl_socket_new(pool->base, -1, pool->token_ssl,
@@ -172,11 +181,13 @@ make_token_request(struct http_connection_pool *pool){
     evhttp_add_header(token_req->output_headers, "Accept", "*/*");
 
     evhttp_make_request(pool->token_connection.connection, token_req, EVHTTP_REQ_GET, "/");
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 token_get_completed_cb(struct evhttp_request *req, void *arg) {
-    printf("Got token response: %d %s\n", req->response_code, req->response_code_line);
+    JDM_ENTER_FUNCTION;
+    JDM_TRACE("Got token response: %d %s", req->response_code, req->response_code_line);
     struct http_connection_pool *pool = (struct http_connection_pool *) arg;
     if (req->response_code != 200) goto fail;
 
@@ -202,17 +213,20 @@ token_get_completed_cb(struct evhttp_request *req, void *arg) {
     pool->token[token_len-1] = 0;
     memcpy(pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
 
-    printf("Got token: %s\n", pool->token);
+    JDM_TRACE("Got token: %s", pool->token);
     dispatch_all_queued_requests(pool);
+    JDM_LEAVE_FUNCTION;
     return;
 
     fail:
-    printf("Unable to get token, retrying\n");
+    JDM_TRACE("Unable to get token, retrying");
     make_token_request(pool);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 dispatch_request_state_on_token(struct http_connection_pool *pool, struct request_state *state) {
+    JDM_ENTER_FUNCTION;
     if (pool->token)
         return http_dispatch_request_state(state);
     else
@@ -220,11 +234,13 @@ dispatch_request_state_on_token(struct http_connection_pool *pool, struct reques
 
     if (pool->fetching_token)
         vec_add(&pool->queued_requests, state);
+    JDM_LEAVE_FUNCTION;
     return 1;
 }
 
 static int
 dispatch_all_queued_requests(struct http_connection_pool *pool){
+    JDM_ENTER_FUNCTION;
     int ret = (int) pool->queued_requests.len;
     for (int i = 0; i < pool->queued_requests.len; ++i) {
         struct request_state *state = (struct request_state*) pool->queued_requests.el[i];
@@ -232,21 +248,26 @@ dispatch_all_queued_requests(struct http_connection_pool *pool){
         http_dispatch_request_state(state);
     }
     vec_remove_all(&pool->queued_requests);
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static void
 http_get_no_cache_cb(struct evhttp_request *req, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct request_state *state = (struct request_state *) arg;
 
     if (req == NULL) {
-        printf("timed out!\n");
+        JDM_WARN("Timed out when making http request!");
+        JDM_LEAVE_FUNCTION;
         return;
     } else if (req->response_code == 0) {
-        printf("connection refused!\n");
+        JDM_WARN("Connection refused when making http request!");
+        JDM_LEAVE_FUNCTION;
         return;
     } else if (req->response_code != 200) {
-        printf("error: %u %s\n", req->response_code, req->response_code_line);
+        JDM_WARN("Error with http request: %u %s", req->response_code, req->response_code_line);
+        JDM_LEAVE_FUNCTION;
         return;
     }
 
@@ -254,13 +275,14 @@ http_get_no_cache_cb(struct evhttp_request *req, void *arg) {
         const char *clens = evhttp_find_header(req->input_headers, "content-length");
         char *end = NULL;
         state->response_size = strtoll(clens, &end, 10);
-        printf("Send expected response size: %zu\n", state->response_size);
+        JDM_TRACE("Send expected response size: %zu", state->response_size);
         enum error_type no_err = ET_NO_ERROR;
         write(state->out_fd, &no_err, 1);
         write(state->out_fd, &state->response_size, sizeof(state->response_size));
     }
     struct evbuffer *b = evhttp_request_get_input_buffer(req);
     evbuffer_write(b, state->out_fd);
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
@@ -270,6 +292,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
     if (req == NULL || req->response_code != 200) {
         return;
     }
+    JDM_ENTER_FUNCTION;
 
     struct write_job *wj = &state->write_job;
 
@@ -278,7 +301,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
         const char *clens = evhttp_find_header(req->input_headers, "content-length");
         char *end = NULL;
         state->response_size = strtoll(clens, &end, 10);
-        printf("Send expected response size: %zu\n", state->response_size);
+        JDM_TRACE("Send expected response size: %zu", state->response_size);
 
         offset = sizeof(state->response_size) + 1;
         enum error_type no_err = ET_NO_ERROR;
@@ -301,6 +324,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
     }else{
         wj->offset += got + offset;
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
@@ -311,12 +335,13 @@ http_connection_close(struct evhttp_connection *connection, void *arg) {
 
 static void
 http_get_complete_cb(struct evhttp_request *req, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct request_state *state = (struct request_state *) arg;
     if (req == NULL) {
-        printf("timed out!\n");
+        JDM_WARN("Timed out when making http request!");
         write_error(state->out_fd, ET_HTTP, "timed out!");
     } else if (req->response_code == 0) {
-        printf("connection refused!\n");
+        JDM_WARN("Connection refused when making http request!");
         write_error(state->out_fd, ET_HTTP, "connection refused!");
     } else if (req->response_code == 401) { // Token expired, get new one
 
@@ -325,7 +350,7 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
             return; // Token has changed since the request was made
         }
 
-        printf("access token expired, getting new one\n");
+        JDM_TRACE("access token expired, getting new one");
 
         vec_add(&state->pool->queued_requests, state);
         make_token_request(state->pool);
@@ -347,10 +372,12 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
         fclose(state->fp);
     }
     free(arg);
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 http_dispatch_request_state(struct request_state *state) {
+    JDM_ENTER_FUNCTION;
     struct evhttp_request *req = evhttp_request_new(http_get_complete_cb, state);
     evhttp_add_header(req->output_headers, "Connection", "keep-alive");
     evhttp_add_header(req->output_headers, "Host", state->api ? SPOTIFY_API_HOST : SPOTIFY_PARTNER_HOST);
@@ -359,12 +386,14 @@ http_dispatch_request_state(struct request_state *state) {
     req->cb_arg = state;
 
     evhttp_make_request(state->connection->connection, req, EVHTTP_REQ_GET, state->request);
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
 int
 http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int fd, FILE *fp, SSL *ssl,
                       const char *host, bool api, http_request_finished_cb cb, void *userp) {
+    JDM_ENTER_FUNCTION;
     struct event_base *base = pool->base;
 
     struct connection *connection;
@@ -387,7 +416,7 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int
 
 
     if (!connection->active) {
-        printf("Activated new connection\n");
+        JDM_TRACE("Activated new http connection");
         connection->bev = bufferevent_openssl_socket_new(base, -1, ssl,
                                                         BUFFEREVENT_SSL_CONNECTING,
                                                          BEV_OPT_CLOSE_ON_FREE | BEV_OPT_DEFER_CALLBACKS);
@@ -413,11 +442,13 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int
     }
 
     dispatch_request_state_on_token(pool, state);
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
 void
 http_cleanup(struct http_connection_pool *pool){
+    JDM_ENTER_FUNCTION;
     if (pool->ssl_ctx_api)
         SSL_CTX_free(pool->ssl_ctx_api);
     if (pool->ssl_api)
@@ -449,6 +480,7 @@ http_cleanup(struct http_connection_pool *pool){
 
     free(pool->token);
     vec_free(&pool->queued_requests);
+    JDM_LEAVE_FUNCTION;
 }
 
 // to_hex & urlencode from https://www.geekhideout.com/urlcode.shtml

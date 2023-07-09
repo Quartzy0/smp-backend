@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <jdm.h>
 
 struct credentials *credentials;
 size_t credentials_count;
@@ -83,6 +84,7 @@ write_error_spotify(int fd) {
 void
 clean_element(struct element *element) {
     if (!element) return;
+    JDM_ENTER_FUNCTION;
     if (element->session) {
         librespotc_close(element->session);
     }
@@ -91,6 +93,7 @@ clean_element(struct element *element) {
     if (element->cache_fp) fclose(element->cache_fp);
     free(element->path);
     memset(element, 0, sizeof(*element));
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
@@ -98,25 +101,28 @@ session_error(
         struct sp_session *session, enum sp_error err,
         void *userp) { // On session error, create a new session in its place and continue playing the previous song
     if (err == SP_ERR_NOCONNECTION) return;
+    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) userp;
     if (err == SP_ERR_TRACK_NOT_FOUND){
-        fprintf(stderr, "Track not found error: '%s'\n", element->id);
+        JDM_TRACE("Track not found error: '%s'", element->id);
         for (int i = 0; i < element->fd_vec.len; ++i) {
             write_error_spotify(element->fd_vec.el[i]);
         }
         clean_element(element);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     if (element->retries >= 3){
-        fprintf(stderr, "Session error detected. Failed after 3 retries, disconnecting.\n");
+        JDM_WARN("Session error detected. Failed after 3 retries, disconnecting.");
         for (int i = 0; i < element->fd_vec.len; ++i) {
             write_error(element->fd_vec.el[i], ET_SPOTIFY_INTERNAL, "Failed after 3 retries, disconnecting");
         }
         clean_element(element);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     element->retries++;
-    printf("Session error detected, reconnecting\n");
+    JDM_WARN("Session error detected, reconnecting");
     element->creds->uses--;
 
     if (element->read_ev){
@@ -133,7 +139,7 @@ session_error(
     }
     // Log back in
     struct credentials *creds = get_credentials();
-    printf("Creating new session as %s\n", creds->creds.username);
+    JDM_TRACE("Creating new session as %s", creds->creds.username);
     element->creds = creds;
     if (creds->creds.stored_cred_len == 0) {
         librespotc_login_password(creds->creds.username,
@@ -146,38 +152,46 @@ session_error(
                                      element, element->base);
     }
     if (!element->session) {
-        fprintf(stderr, "Error creating librespot session: %s\n", librespotc_last_errmsg());
+        JDM_ERROR("Error creating librespot session: %s", librespotc_last_errmsg());
+        JDM_LEAVE_FUNCTION;
         return;
     }
     creds->uses++;
+    JDM_LEAVE_FUNCTION;
 }
 
 struct credentials *
 get_credentials() {
+    JDM_ENTER_FUNCTION;
     pthread_mutex_lock(&credentials_mutex);
     for (int i = 0; i < credentials_count; ++i) {
         if (++credentials_last_index >= credentials_count) credentials_last_index = 0;
         if (credentials[credentials_last_index].uses <= MAX_CREDENTIAL_USES){
             pthread_mutex_unlock(&credentials_mutex);
+            JDM_LEAVE_FUNCTION;
             return &credentials[credentials_last_index];
         }
     }
     pthread_mutex_unlock(&credentials_mutex);
+    JDM_LEAVE_FUNCTION;
     return NULL;
 }
 
 void
 finish_seek_cb(int ret, void *userp) {
+    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) userp;
     struct event_base *base = element->base;
     if (ret){
-        fprintf(stderr, "Error when seeking\n"); // TODO: Handle this error
+        JDM_ERROR("Error when seeking"); // TODO: Handle this error
 //        session_error(element->session, SP_ERR_INVALID, element);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     int fd = librespotc_get_session_fd(element->session);
     if(fd == -1) {
         session_error(element->session, SP_ERR_INVALID, element);
+        JDM_LEAVE_FUNCTION;
         return;
     }
 
@@ -204,54 +218,61 @@ finish_seek_cb(int ret, void *userp) {
     event_add(element->read_ev, NULL);
 
     librespotc_write(element->session);
-    if (element->progress) printf("Continuing sending data for '%s' starting at %zu\n", element->id, element->progress);
+    if (element->progress) JDM_TRACE("Continuing sending data for '%s' starting at %zu", element->id, element->progress);
     else
-        printf("Sending data for '%s'\n", element->id);
+        JDM_TRACE("Sending data for '%s'", element->id);
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 spotify_file_open_cb(int fd, void *userp) {
+    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) userp;
 
     if (fd < 0) {
-        fprintf(stderr, "Error opening librespot file: %s\n", librespotc_last_errmsg());
+        JDM_ERROR("Error opening librespot file: %s", librespotc_last_errmsg());
         for (int i = 0; i < element->fd_vec.len; ++i) {
             write_error_spotify(element->fd_vec.el[i]);
         }
         if (element->cache_fp) fclose(element->cache_fp);
         element->cache_fp = NULL;
         remove(element->path);
+        JDM_LEAVE_FUNCTION;
         return;
     }
 
-    printf("Opened spotify track (%d)\n", fd);
+    JDM_TRACE("Opened spotify track (%d)", fd);
 
     if (element->progress) {
         librespotc_seek(element->session, element->progress, finish_seek_cb, userp);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     element->file_len = librespotc_get_filelen(element->session);
     finish_seek_cb(0, userp);
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 session_cb(int ret, void *userp) {
+    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) userp;
 
     if (!element->session) {
-        fprintf(stderr, "Error creating librespot session: %s\n", librespotc_last_errmsg());
+        JDM_ERROR("Error creating librespot session: %s", librespotc_last_errmsg());
         for (int i = 0; i < element->fd_vec.len; ++i) {
             write_error_spotify(element->fd_vec.el[i]);
         }
         fclose(element->cache_fp);
         remove(element->path);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     char *region = librespotc_get_country(element->session);
-    printf("Created spotify session (%d). Region: %.2s\n", ret, region);
+    JDM_TRACE("Created spotify session (%d). Region: %.2s", ret, region);
 
     if (region[0] != element->creds->region[0] || region[1] != element->creds->region[1]){ // Correct region in case it's wrong
-        printf("Region mismatch found for account '%s'. Correcting from %.2s to %.2s\n", element->creds->creds.username, element->creds->region, region);
+        JDM_WARN("Region mismatch found for account '%s'. Correcting from %.2s to %.2s", element->creds->creds.username, element->creds->region, region);
         element->creds->region[0] = region[0];
         element->creds->region[1] = region[1];
         spotify_update_available_regions();
@@ -259,15 +280,16 @@ session_cb(int ret, void *userp) {
 
     int r = librespotc_open(element->id, element->session, spotify_file_open_cb, userp);
     if (r) {
-        fprintf(stderr, "Error when calling librespotc_open: %s\n", librespotc_last_errmsg());
+        JDM_ERROR("Error when calling librespotc_open: %s", librespotc_last_errmsg());
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 struct element *
 spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd,
                          const char *region, audio_finished_cb cb, void *cb_arg,
                          struct event_base *base) {
-
+    JDM_ENTER_FUNCTION;
     int uninit = -1;
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
         if (!pool->elements[i].active && (!region || !pool->elements[i].creds || (region[0] == pool->elements[i].creds->region[0] && region[1] == pool->elements[i].creds->region[1]))) {
@@ -282,6 +304,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
                 pool->elements[i].cb = cb;
                 pool->elements[i].cb_arg = cb_arg;
                 session_cb(0, &pool->elements[i]);
+                JDM_LEAVE_FUNCTION;
                 return &pool->elements[i]; // Not active and a valid session
             }
             if (uninit == -1) uninit = i;
@@ -290,7 +313,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
 
     if (uninit != -1) {
         struct credentials *creds = get_credentials();
-        printf("Creating new session as %s\n", creds->creds.username);
+        JDM_TRACE("Creating new session as %s", creds->creds.username);
         pool->elements[uninit].progress = progress;
         fd_vec_init(&pool->elements[uninit].fd_vec);
         fd_vec_add(&pool->elements[uninit].fd_vec, fd);
@@ -302,8 +325,8 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
         pool->elements[uninit].cb_arg = cb_arg;
         pool->elements[uninit].cache_fp = fopen(pool->elements[uninit].path, "a");
         if (!pool->elements[uninit].cache_fp){
-            fprintf(stderr, "Error occurred while trying to open file '%s': %s\n", pool->elements[uninit].path,
-                    strerror(errno));
+            JDM_ERROR("Error occurred while trying to open file '%s': %s", pool->elements[uninit].path,
+                    JDM_ERRNO_MESSAGE);
         }
         memcpy(pool->elements[uninit].id, id, sizeof(pool->elements[uninit].id));
         pool->elements[uninit].creds = creds;
@@ -319,13 +342,16 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
         }
         librespotc_session_error_cb(pool->elements[uninit].session, session_error, &pool->elements[uninit]);
         creds->uses++;
+        JDM_LEAVE_FUNCTION;
         return &pool->elements[uninit];
     }
+    JDM_LEAVE_FUNCTION;
     return NULL;
 }
 
 void spotify_stop_element(struct element *element) {
     if (!element) return;
+    JDM_ENTER_FUNCTION;
     if (element->read_ev) event_free(element->read_ev);
     element->read_ev = NULL;
     if (element->session) librespotc_close(element->session);
@@ -346,10 +372,12 @@ void spotify_stop_element(struct element *element) {
     clean_element(element);
     element->active = false;
     element->progress = 0;
+    JDM_LEAVE_FUNCTION;
 }
 
 static void
 audio_read_cb(int fd, short what, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) arg;
     size_t got;
 
@@ -376,7 +404,7 @@ audio_read_cb(int fd, short what, void *arg) {
         }
     }
     if (got <= 0 || element->progress >= element->file_len) {
-        printf("Playback ended (%zu)\n", got);
+        JDM_TRACE("Playback ended (%zu)", got);
         event_free(element->read_ev);
         element->read_ev = NULL;
         librespotc_close(element->session);
@@ -397,10 +425,12 @@ audio_read_cb(int fd, short what, void *arg) {
         element->active = false;
         element->progress = 0;
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 int
 spotify_init(int argc, char **argv) {
+    JDM_ENTER_FUNCTION;
     credentials_mutex = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
     if (argc == 2) { // Load credentials from file
         FILE *fp = fopen(argv[1], "r"); // File format is: <email> <password> <username> <region>\n
@@ -424,7 +454,8 @@ spotify_init(int argc, char **argv) {
             if (credentials_len <= credentials_count) {
                 struct credentials *tmp = realloc(credentials, (credentials_len + 10) * sizeof(*tmp));
                 if (!tmp) {
-                    perror("Error when reallocating");
+                    JDM_ERROR("Error when reallocating: %s", JDM_ERRNO_MESSAGE);
+                    JDM_LEAVE_FUNCTION;
                     return -1;
                 }
                 credentials = tmp;
@@ -450,17 +481,18 @@ spotify_init(int argc, char **argv) {
         if (credentials_len > credentials_count) { // Reallocate credentials to be just the right size
             struct credentials *tmp = realloc(credentials, (credentials_count) * sizeof(*tmp));
             if (!tmp) {
-                perror("Error when reallocating");
+                JDM_ERROR("Error when reallocating: %s", JDM_ERRNO_MESSAGE);
+                JDM_LEAVE_FUNCTION;
                 return -1;
             }
             credentials = tmp;
         }
-        printf("Parsed %zu credentials from %s\n", credentials_count, argv[1]);
+        JDM_INFO("Parsed %zu credentials from %s", credentials_count, argv[1]);
     } else { // Load credentials from arguments
         credentials_count = (argc - 1) / 3;
         credentials_last_index = -1;
         credentials = calloc(credentials_count, sizeof(*credentials));
-        printf("Detected %zu users from arguments\n", credentials_count);
+        JDM_INFO("Detected %zu users from arguments", credentials_count);
         char **argv1 = &argv[1];
         for (int i = 0; i < credentials_count; ++i) {
             size_t username_len = strlen(argv1[i * 3]), password_len = strlen(argv1[i * 3 + 1]), region_len = strlen(argv1[i * 3 + 2]);
@@ -470,17 +502,15 @@ spotify_init(int argc, char **argv) {
         }
     }
     spotify_update_available_regions();
-    printf("Available regions (%zu): ", available_region_count);
+    char regions_string[available_region_count*3];
     for (int i = 0; i < available_region_count; ++i) {
-        putc(available_regions[i*2], stdout);
-        putc(available_regions[i*2+1], stdout);
-        if (i==available_region_count-1){
-            putc('\n', stdout);
-        }else{
-            putc(' ', stdout);
-        }
+        regions_string[i*3] = available_regions[i*2];
+        regions_string[i*3+1] = available_regions[i*2+1];
+        regions_string[i*3+2] = ' ';
     }
-
+    regions_string[available_region_count*3-1] = 0;
+    JDM_INFO("Available regions (%zu): %s", available_region_count, regions_string);
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -496,6 +526,7 @@ int region_count_container_comprar(const void *a, const void *b){
 // Puts all available regions into a list and also sorts them in terms of how many accounts use that region
 void
 spotify_update_available_regions() { // TODO: Make this thread safe
+    JDM_ENTER_FUNCTION;
     if (available_regions){
         free(available_regions);
         available_regions = NULL;
@@ -526,6 +557,7 @@ spotify_update_available_regions() { // TODO: Make this thread safe
         available_regions[i*2] = regions_container[i].region[0];
         available_regions[i*2+1] = regions_container[i].region[1];
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 void
@@ -536,9 +568,11 @@ spotify_clean(struct session_pool *pool) {
 }
 
 void spotify_free_global() {
+    JDM_ENTER_FUNCTION;
     free(credentials);
     credentials = NULL;
     pthread_mutex_destroy(&credentials_mutex);
     librespotc_deinit();
     free(available_regions);
+    JDM_LEAVE_FUNCTION;
 }

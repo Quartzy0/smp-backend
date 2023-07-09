@@ -7,7 +7,6 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <event2/event.h>
-#include <event2/bufferevent.h>
 #include <sys/sendfile.h>
 
 #include "spotify.h"
@@ -20,6 +19,7 @@ char region_url_insertion[] = "?market=";
 void
 http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool, const char *uri_in,
                      const char *path_in, bool api, bool insert_id_url, http_request_finished_cb cb, void *userp) {
+    JDM_ENTER_FUNCTION;
     char *uri;
     if (insert_id_url) {
         size_t uri_in_len = strlen(uri_in);
@@ -59,6 +59,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
         }   // Since the API requests are very small in comparison to downloading songs, an
             // extra request isn't a big deal.
         fclose(fp);
+        JDM_LEAVE_FUNCTION;
         return;
     }
     FILE *fp = fopen(path, "a");
@@ -68,6 +69,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
     } else {
         http_dispatch_request_partner(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp, cb, userp);
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 void
@@ -84,6 +86,7 @@ http_request_finished(void *arg){
 
 static void
 cmd_read_cb(int wrk_fd, short what, void *arg) {
+    JDM_ENTER_FUNCTION;
     struct worker *worker = (struct worker *) arg;
     struct worker_request req;
     read(wrk_fd, &req, sizeof(req));
@@ -121,21 +124,21 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                         }
                         if (element) {
                             fd_vec_add(&element->fd_vec, req.client_fd);
-                            printf("[worker %d] Sending data for '%.22s' from cache while reading\n", worker->id, req.regioned_id.id);
+                            JDM_TRACE("[worker %d] Sending data for '%.22s' from cache while reading", worker->id, req.regioned_id.id);
                             fclose(fp);
-                            return;
+                            break;
                         } else {
                             progress = actual_len - sizeof(tmp_data);
                         }
                         fclose(fp);
                     } else {
-                        printf("[worker %d] Sending data for '%.22s' from cache\n", worker->id, req.regioned_id.id);
+                        JDM_TRACE("[worker %d] Sending data for '%.22s' from cache", worker->id, req.regioned_id.id);
                         fclose(fp);
-                        return;
+                        break;
                     }
                 }
             }
-            printf("[worker %d] Sending data for '%.22s'\n", worker->id, req.regioned_id.id);
+            JDM_TRACE("[worker %d] Sending data for '%.22s'", worker->id, req.regioned_id.id);
 
             spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd, req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb, worker, worker->base);
             break;
@@ -185,11 +188,11 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             strcat(uri, req.search_query.generic_query);
             free(req.search_query.generic_query);
 
-            printf("url: %s\n", uri);
+            JDM_TRACE("Search url: %s", uri);
 
             http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL, http_request_finished, worker);
             free(uri);
-            return;
+            break;
         }
         case RECOMMENDATIONS: {
             uint8_t t = req.recommendation_seed.t, a = req.recommendation_seed.a;
@@ -230,7 +233,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             }
             memcpy(uri_b, "&limit=30", 9);
             uri[uri_len - 1] = 0;
-            printf("Performing request using uri: %s\n", uri);
+            JDM_TRACE("Performing request using uri: %s", uri);
             http_dispatch_request_api(&worker->http_connection_pool, uri, req.client_fd, NULL, http_request_finished, worker);
             break;
         }
@@ -238,9 +241,9 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             int element_len = SESSION_POOL_MAX;
             for (int i = 0; i < element_len; ++i) {
                 if(fd_vec_remove_element(&worker->session_pool.elements[i].fd_vec, req.client_fd)) {
-                    printf("Client disconnected (%d)\n", req.client_fd);
+                    JDM_TRACE("Client disconnected (%d)", req.client_fd);
                     if (fd_vec_is_empty(&worker->session_pool.elements[i].fd_vec)){
-                        printf("All clients for element streaming '%.22s' have disconnected\n", worker->session_pool.elements[i].id);
+                        JDM_TRACE("All clients for element streaming '%.22s' have disconnected", worker->session_pool.elements[i].id);
                         spotify_stop_element(&worker->session_pool.elements[i]);
                     }
                     break;
@@ -255,14 +258,23 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             close(worker->cmd[0]);
             event_free(worker->cmd_ev);
             event_base_loopbreak(worker->base);
+            break;
         }
         default: break;
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 void *
 worker_loop(void *arg) {
     struct worker *worker = (struct worker *) arg;
+    char thread_name[12];
+    snprintf(thread_name, 12, "Worker %d", worker->id);
+    jdm_init_thread(thread_name, JDM_MESSAGE_LEVEL_NONE, 256, 256, NULL);
+    jdm_set_hook(error_message_hook, NULL);
+    JDM_ENTER_FUNCTION;
+    set_sigsegv_handler();
+
     worker->base = event_base_new();
     worker->cmd_ev = event_new(worker->base, worker->cmd[0], EV_READ | EV_PERSIST, cmd_read_cb, worker);
     event_add(worker->cmd_ev, NULL);
@@ -270,21 +282,26 @@ worker_loop(void *arg) {
     http_set_base(worker->base, &worker->http_connection_pool);
     event_base_dispatch(worker->base);
     event_base_free(worker->base);
-    printf("Worker %d freed\n", worker->id);
+    JDM_INFO("Worker %d freed", worker->id);
+    JDM_LEAVE_FUNCTION;
+    jdm_cleanup_thread();
     pthread_exit(NULL);
 }
 
 int
 worker_init(struct worker *worker) {
+    JDM_ENTER_FUNCTION;
     memset(&worker->session_pool, 0, sizeof(worker->session_pool));
     http_init(&worker->http_connection_pool);
     hash_table_init(&worker_id_table);
     pipe(worker->cmd);
     int ret = pthread_create(&worker->tid, NULL, worker_loop, worker);
     if (ret) {
-        perror("Error when calling pthread_create()");
+        JDM_ERROR("Error when calling pthread_create(): %s", strerror(errno));
+        JDM_LEAVE_FUNCTION;
         return 1;
     }
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -294,6 +311,7 @@ void worker_send_request(struct worker *worker, struct worker_request *request) 
 
 struct worker *
 worker_find_least_busy(struct worker *workers, size_t count) {
+    JDM_ENTER_FUNCTION;
     size_t lowest = -1;
     struct worker *lw;
     for (int i = 0; i < count; ++i) {
@@ -303,6 +321,7 @@ worker_find_least_busy(struct worker *workers, size_t count) {
             lw = &workers[i];
         }
     }
+    JDM_LEAVE_FUNCTION;
     return lw;
 }
 
@@ -318,6 +337,7 @@ hash(const char *name) {
 
 void
 hash_table_remove(struct worker_hash_table *table, const char *key){
+    JDM_ENTER_FUNCTION;
     unsigned long bucket_index = hash(key) % WORKER_HASH_TABLE_BUCKETS;
 
     pthread_mutex_lock(&table->mutex);
@@ -331,6 +351,7 @@ hash_table_remove(struct worker_hash_table *table, const char *key){
         }
     }
     pthread_mutex_unlock(&table->mutex);
+    JDM_LEAVE_FUNCTION;
 }
 
 void hash_table_init(struct worker_hash_table *table) {
@@ -342,6 +363,7 @@ void hash_table_init(struct worker_hash_table *table) {
 
 struct worker_hash_table_element *
 hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker) {
+    JDM_ENTER_FUNCTION;
     unsigned long bucket_index = hash(key) % WORKER_HASH_TABLE_BUCKETS;
 
     pthread_mutex_lock(&table->mutex);
@@ -349,6 +371,7 @@ hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, stru
     for (int i = 0; i < bucket->len; ++i) {
         if (bucket->elements && !memcmp(bucket->elements[i].key, key, 22)) {
             pthread_mutex_unlock(&table->mutex);
+            JDM_LEAVE_FUNCTION;
             return &bucket->elements[i];
         }
     }
@@ -366,11 +389,13 @@ hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, stru
     bucket->elements[bucket->len].worker = worker;
     bucket->len++;
     pthread_mutex_unlock(&table->mutex);
+    JDM_LEAVE_FUNCTION;
     return &bucket->elements[bucket->len-1];
 }
 
 void
 hash_table_clean(struct worker_hash_table *table){
+    JDM_ENTER_FUNCTION;
     pthread_mutex_lock(&table->mutex);
     for (int i = 0; i < WORKER_HASH_TABLE_BUCKETS; ++i) {
         free(table->buckets[i].elements);
@@ -378,6 +403,7 @@ hash_table_clean(struct worker_hash_table *table){
     pthread_mutex_unlock(&table->mutex);
     pthread_mutex_destroy(&table->mutex);
     memset(table, 0, sizeof(*table));
+    JDM_LEAVE_FUNCTION;
 }
 
 void worker_cleanup(struct worker *worker) {

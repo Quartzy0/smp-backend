@@ -27,7 +27,6 @@
 #define be64toh(x) OSSwapBigToHostInt64(x)
 #endif
 
-#include "../../../src/debug.h"
 #include "librespot-c.h"
 #include "crypto.h"
 #include <event2/bufferevent.h>

@@ -12,8 +12,6 @@ struct crypto_cipher {
     uint8_t key[32];
     uint32_t nonce;
     uint8_t last_header[3]; // uint8 cmd and uint16 BE size
-
-    void (*logmsg)(const char *fmt, ...);
 };
 
 struct crypto_aes_cipher {

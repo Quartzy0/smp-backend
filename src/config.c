@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <jdm.h>
 
 size_t get_mul(char c) {
     switch (c) {
@@ -47,7 +48,7 @@ size_t parse_num(const char *str) {
         ret += sizeof(#name":")-1;                                                                  \
         (config)->name = parse_num(ret);                                                            \
         if((config)->name == -1){                                                                   \
-            fprintf(stderr, "Error when parsing config: Invalid number provided for " #name "\n");  \
+            JDM_ERROR("Error when parsing config: Invalid number provided for " #name);             \
         }                                                                                           \
     }else{                                                                                          \
         config_out->name = default_value;                                                           \
@@ -82,6 +83,7 @@ size_t parse_num(const char *str) {
 
 int
 parse_config(const char *file, struct smp_config *config_out) {
+    JDM_ENTER_FUNCTION;
     FILE *fp = fopen(file, "r");
     size_t file_len = 1;
     if (fp){
@@ -115,6 +117,7 @@ parse_config(const char *file, struct smp_config *config_out) {
     int cpu_cores = get_cpu_cores();
     PARSE_NUM_PROPERTY(config_out, worker_threads, cpu_cores-1);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -123,6 +126,7 @@ parse_config(const char *file, struct smp_config *config_out) {
 
 void
 print_config(struct smp_config *config) {
+    JDM_ENTER_FUNCTION;
     PRINT_PROPERTY_INT(config, total_cache_max);
     PRINT_PROPERTY_INT(config, music_info_cache_max);
     PRINT_PROPERTY_INT(config, music_data_cache_max);
@@ -136,13 +140,16 @@ print_config(struct smp_config *config) {
     PRINT_PROPERTY_STRING(config, playlist_info_cache_path);
 
     PRINT_PROPERTY_INT(config, worker_threads);
+    JDM_LEAVE_FUNCTION;
 }
 
 void free_config(struct smp_config *config) {
+    JDM_ENTER_FUNCTION;
     free(config->global_cache_path);
     free(config->album_info_cache_path);
     free(config->playlist_info_cache_path);
     free(config->music_data_cache_path);
     free(config->music_info_cache_path);
     memset(config, 0, sizeof(*config));
+    JDM_LEAVE_FUNCTION;
 }

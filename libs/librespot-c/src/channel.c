@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#include <jdm.h>
 
 #include "librespot-c-internal.h"
 
@@ -42,6 +43,7 @@ void
 channel_free(struct sp_channel *channel) {
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
         return;
+    JDM_ENTER_FUNCTION;
 
     if (channel->audio_buf) {
         evbuffer_free(channel->audio_buf);
@@ -65,20 +67,24 @@ channel_free(struct sp_channel *channel) {
 
     channel->audio_fd[0] = -1;
     channel->audio_fd[1] = -1;
+    JDM_LEAVE_FUNCTION;
 }
 
 void
 channel_free_all(struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     int i;
 
     for (i = 0; i < sizeof(session->channels) / sizeof(session->channels)[0];
     i++)
     channel_free(&session->channels[i]);
+    JDM_LEAVE_FUNCTION;
 }
 
 int
 channel_new(struct sp_channel **new_channel, struct sp_session *session, const char *path, struct event_base *evbase,
             event_callback_fn write_cb, enum sp_media_type media_type) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     uint16_t i = SP_DEFAULT_CHANNEL;
     int ret;
@@ -113,15 +119,18 @@ channel_new(struct sp_channel **new_channel, struct sp_session *session, const c
 
     *new_channel = channel;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
     channel_free(channel);
+    JDM_LEAVE_FUNCTION;
     return -1;
 }
 
 static int
 channel_flush(struct sp_channel *channel) {
+    JDM_ENTER_FUNCTION;
     uint8_t buf[4096];
     int fd = channel->audio_fd[0];
     int flags;
@@ -133,21 +142,28 @@ channel_flush(struct sp_channel *channel) {
     // Note that we flush the read side. We set the fd to non-blocking in case
     // the caller changed that, and then read until empty
     flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1)
+    if (flags == -1) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     ret = fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-    if (ret < 0)
+    if (ret < 0) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     do
         got = read(fd, buf, sizeof(buf));
     while (got > 0);
 
     ret = fcntl(fd, F_SETFL, flags);
-    if (ret < 0)
+    if (ret < 0) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 }
 
@@ -158,6 +174,7 @@ channel_play(struct sp_channel *channel) {
 
 void
 channel_stop(struct sp_channel *channel) {
+    JDM_ENTER_FUNCTION;
     channel->state = SP_CHANNEL_STATE_STOPPED;
 
     // This will tell the reader that there is no more to read. He should then
@@ -165,10 +182,12 @@ channel_stop(struct sp_channel *channel) {
     // channel_free().
     close(channel->audio_fd[1]);
     channel->audio_fd[1] = -1;
+    JDM_LEAVE_FUNCTION;
 }
 
 static int
 channel_seek_internal(struct sp_channel *channel, size_t pos, bool do_flush) {
+    JDM_ENTER_FUNCTION;
     uint32_t seek_words;
     int ret;
 
@@ -195,9 +214,11 @@ channel_seek_internal(struct sp_channel *channel, size_t pos, bool do_flush) {
     channel->file.offset_words = seek_words;
     channel->file.received_words = seek_words;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
@@ -208,9 +229,11 @@ channel_seek(struct sp_channel *channel, size_t pos) {
 
 void
 channel_pause(struct sp_channel *channel) {
+    JDM_ENTER_FUNCTION;
     channel_flush(channel);
 
     channel->state = SP_CHANNEL_STATE_PAUSED;
+    JDM_LEAVE_FUNCTION;
 }
 
 // After a disconnect we connect to another one and try to resume. To make that
@@ -221,6 +244,7 @@ channel_retry(struct sp_channel *channel) {
 
     if (!channel)
         return;
+    JDM_ENTER_FUNCTION;
 
     channel->is_data_mode = false;
 
@@ -230,6 +254,7 @@ channel_retry(struct sp_channel *channel) {
     pos = 4 * channel->file.received_words - SP_OGG_HEADER_LEN;
 
     channel_seek_internal(channel, pos, false); // false => don't flush
+    JDM_LEAVE_FUNCTION;
 }
 
 // Always returns number of byte read so caller can advance read pointer. If
@@ -237,11 +262,14 @@ channel_retry(struct sp_channel *channel) {
 // caller should switch the channel to data mode.
 static ssize_t
 channel_header_parse(struct sp_channel_header *header, uint8_t *data, size_t data_len) {
+    JDM_ENTER_FUNCTION;
     uint8_t *ptr;
     uint16_t be;
 
-    if (data_len < sizeof(be))
+    if (data_len < sizeof(be)) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     ptr = data;
     memset(header, 0, sizeof(struct sp_channel_header));
@@ -252,8 +280,10 @@ channel_header_parse(struct sp_channel_header *header, uint8_t *data, size_t dat
 
     if (header->len == 0)
         goto done; // No more headers
-    else if (data_len < header->len + sizeof(be))
+    else if (data_len < header->len + sizeof(be)) {
+        JDM_LEAVE_FUNCTION;
         return -1;
+    }
 
     header->id = ptr[0];
     ptr += 1;
@@ -265,30 +295,33 @@ channel_header_parse(struct sp_channel_header *header, uint8_t *data, size_t dat
     assert(ptr - data == header->len + sizeof(be));
 
     done:
+    JDM_LEAVE_FUNCTION;
     return header->len + sizeof(be);
 }
 
 static void
 channel_header_handle(struct sp_channel *channel, struct sp_channel_header *header) {
+    JDM_ENTER_FUNCTION;
     uint32_t be32;
-
-    sp_cb.hexdump("Received header\n", header->data, header->data_len);
 
     // The only header that librespot seems to use is 0x3, which is the audio file
     // size in words (incl. headers?)
     if (header->id == 0x3) {
         if (header->data_len != sizeof(be32)) {
-            sp_cb.logmsg("Unexpected header length for header id 0x3\n");
+            JDM_WARN("Unexpected header length for header id 0x3");
+            JDM_LEAVE_FUNCTION;
             return;
         }
 
         memcpy(&be32, header->data, sizeof(be32));
         channel->file.len_words = be32toh(be32);
     }
+    JDM_LEAVE_FUNCTION;
 }
 
 static ssize_t
 channel_header_trailer_read(struct sp_channel *channel, uint8_t *msg, size_t msg_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     ssize_t parsed_len;
     ssize_t consumed_len;
     int ret;
@@ -304,8 +337,10 @@ channel_header_trailer_read(struct sp_channel *channel, uint8_t *msg, size_t msg
         channel->file.offset_words += SP_CHUNK_LEN_WORDS;
         channel->is_data_mode = false;
 
+        JDM_LEAVE_FUNCTION;
         return 0;
     } else if (channel->is_data_mode) {
+        JDM_LEAVE_FUNCTION;
         return 0;
     }
 
@@ -324,14 +359,17 @@ channel_header_trailer_read(struct sp_channel *channel, uint8_t *msg, size_t msg
         channel_header_handle(channel, &channel->header);
     }
 
+    JDM_LEAVE_FUNCTION;
     return consumed_len;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 static ssize_t
 channel_data_read(struct sp_channel *channel, uint8_t *msg, size_t msg_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     const char *errmsg;
     int ret;
 
@@ -365,39 +403,50 @@ channel_data_read(struct sp_channel *channel, uint8_t *msg, size_t msg_len, stru
     channel->body.data = msg;
     channel->body.data_len = msg_len;
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 int
 channel_data_write(struct sp_channel *channel) {
+    JDM_ENTER_FUNCTION;
     ssize_t wrote;
     int ret;
 
-    if (channel->state == SP_CHANNEL_STATE_PAUSED || channel->state == SP_CHANNEL_STATE_STOPPED)
+    if (channel->state == SP_CHANNEL_STATE_PAUSED || channel->state == SP_CHANNEL_STATE_STOPPED){
+        JDM_LEAVE_FUNCTION;
         return SP_OK_DONE;
+    }
 
     wrote = evbuffer_write(channel->audio_buf, channel->audio_fd[1]);
-    if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    if (wrote < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        JDM_LEAVE_FUNCTION;
         return SP_OK_WAIT;
-    else if (wrote < 0)
+    } else if (wrote < 0)
         RETURN_ERROR(SP_ERR_WRITE, "Error writing to audio pipe");
 
     channel->audio_written_len += wrote;
 
-    if (evbuffer_get_length(channel->audio_buf) > 0)
+    if (evbuffer_get_length(channel->audio_buf) > 0) {
+        JDM_LEAVE_FUNCTION;
         return SP_OK_WAIT;
+    }
 
+    JDM_LEAVE_FUNCTION;
     return SP_OK_DONE;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 
 int
 channel_msg_read(uint16_t *channel_id, uint8_t *msg, size_t msg_len, struct sp_session *session) {
+    JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     uint16_t be;
     ssize_t consumed_len;
@@ -411,7 +460,6 @@ channel_msg_read(uint16_t *channel_id, uint8_t *msg, size_t msg_len, struct sp_s
 
     channel = channel_get(*channel_id, session);
     if (!channel) {
-        sp_cb.hexdump("Message with unknown channel\n", msg, msg_len);
         RETURN_ERROR(SP_ERR_INVALID, "Could not recognize channel in chunk response");
     }
 
@@ -429,16 +477,20 @@ channel_msg_read(uint16_t *channel_id, uint8_t *msg, size_t msg_len, struct sp_s
     channel->body.data = NULL;
     channel->body.data_len = 0;
 
-    if (!channel->is_data_mode || !(msg_len > 0))
+    if (!channel->is_data_mode || !(msg_len > 0)) {
+        JDM_LEAVE_FUNCTION;
         return 0; // Not in data mode or no data to read
+    }
 
     consumed_len = channel_data_read(channel, msg, msg_len, session);
     if (consumed_len < 0)
         RETURN_ERROR((int) consumed_len, sp_errmsg);
 
+    JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
+    JDM_LEAVE_FUNCTION;
     return ret;
 }
 

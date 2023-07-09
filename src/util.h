@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <aio.h>
+#include <jdm.h>
 
 #define PORT 5394
 #define SESSION_POOL_MAX 50
@@ -55,7 +56,8 @@ int get_cpu_cores();
 
 bool is_valid_id(uint8_t *id);
 
-void
-write_error(int fd, enum error_type err, const char *msg);
+int error_message_hook(const char* thread_name, uint32_t stack_trace_count, const char*const* stack_trace, jdm_message_level level, uint32_t line, const char* file, const char* function, const char* message, void* param);
+
+int set_sigsegv_handler();
 
 #endif //SMP_BACKEND_UTIL_H

@@ -64,11 +64,6 @@ struct sp_sysinfo {
 struct sp_callbacks {
     // Bring your own https client and tcp connector
     int (*https_get)(char **body, const char *url);
-
-    // Debugging
-    void (*hexdump)(const char *msg, uint8_t *data, size_t data_len);
-
-    void (*logmsg)(const char *fmt, ...);
 };
 
 int
