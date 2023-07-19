@@ -8,7 +8,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <jdm.h>
 
 struct credentials *credentials;
 size_t credentials_count;

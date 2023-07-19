@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <aio.h>
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 #define PORT 5394

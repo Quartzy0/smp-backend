@@ -46,6 +46,7 @@ events for proceeding are activated directly.
 "wait": waiting for more data or for write to become possible
 "timeout": receive or write took too long to complete
 */
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 #include "librespot-c-internal.h"
@@ -520,6 +521,7 @@ track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
     // case we need that to complete before doing anything else with the channel,
     // e.g. reset it as track_close() does.
     if (channel->state != SP_CHANNEL_STATE_PLAYING) {
+        JDM_LEAVE_FUNCTION;
         return 0;
     }
 

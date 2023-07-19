@@ -1,4 +1,5 @@
 #include <fcntl.h>
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 #include "librespot-c-internal.h"
@@ -260,7 +261,7 @@ channel_retry(struct sp_channel *channel) {
 // Always returns number of byte read so caller can advance read pointer. If
 // header->len == 0 is returned it means that there are no more headers, and
 // caller should switch the channel to data mode.
-static ssize_t
+static size_t
 channel_header_parse(struct sp_channel_header *header, uint8_t *data, size_t data_len) {
     JDM_ENTER_FUNCTION;
     uint8_t *ptr;
@@ -319,7 +320,7 @@ channel_header_handle(struct sp_channel *channel, struct sp_channel_header *head
     JDM_LEAVE_FUNCTION;
 }
 
-static ssize_t
+static size_t
 channel_header_trailer_read(struct sp_channel *channel, uint8_t *msg, size_t msg_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     ssize_t parsed_len;
@@ -367,7 +368,7 @@ channel_header_trailer_read(struct sp_channel *channel, uint8_t *msg, size_t msg
     return ret;
 }
 
-static ssize_t
+static size_t
 channel_data_read(struct sp_channel *channel, uint8_t *msg, size_t msg_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     const char *errmsg;

@@ -315,7 +315,10 @@ worker_find_least_busy(struct worker *workers, size_t count) {
     size_t lowest = -1;
     struct worker *lw;
     for (int i = 0; i < count; ++i) {
-        if (workers[i].job_count == 0) return &workers[i];
+        if (workers[i].job_count == 0){
+            JDM_LEAVE_FUNCTION;
+            return &workers[i];
+        }
         if (workers[i].job_count < lowest){
             lowest = workers[i].job_count;
             lw = &workers[i];

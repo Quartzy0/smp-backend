@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(smp_backend C)
 
-set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD 11)
 
 add_subdirectory(libs/librespot-c)
 add_subdirectory(test)

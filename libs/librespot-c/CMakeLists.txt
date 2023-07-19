@@ -3,8 +3,6 @@ project(librespot_c C)
 
 set(CMAKE_C_STANDARD 99)
 
-find_package(CURL REQUIRED)
-
 include_directories(.)
 include_directories(src)
 include_directories(src/proto)

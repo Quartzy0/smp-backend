@@ -4,6 +4,7 @@
 
 #include <assert.h>
 #include <ctype.h> // for isdigit(), isupper(), islower()
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 #include "librespot-c-internal.h" // For endian compat functions
@@ -255,13 +256,11 @@ crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *c
     size_t header_len = sizeof(cipher->last_header);
     size_t payload_len;
 
-    JDM_DEBUG("Decrypting %zu bytes with nonce %u", encrypted_len, cipher->nonce);
 //  crypto_hexdump("Key\n", cipher->key, sizeof(cipher->key));
 //  crypto_hexdump("Encrypted\n", encrypted, encrypted_len);
 
     // In case we didn't even receive the basics, header and mac, then return.
     if (encrypted_len < header_len + sizeof(mac)) {
-        JDM_DEBUG("Waiting for %zu header bytes, have %zu", header_len + sizeof(mac), encrypted_len);
         JDM_LEAVE_FUNCTION;
         return 0;
     }
@@ -291,7 +290,6 @@ crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *c
 
     // Not enough data for decrypting the entire packet
     if (payload_len > encrypted_len) {
-        JDM_DEBUG("Waiting for %zu payload bytes, have %zu", payload_len, encrypted_len);
         JDM_LEAVE_FUNCTION;
         return 0;
     }
@@ -304,7 +302,6 @@ crypto_decrypt(uint8_t *encrypted, size_t encrypted_len, struct crypto_cipher *c
 //  crypto_hexdump("mac in\n", encrypted + payload_len, sizeof(mac));
 //  crypto_hexdump("mac our\n", mac, sizeof(mac));
     if (memcmp(mac, encrypted + payload_len, sizeof(mac)) != 0) {
-        JDM_DEBUG("MAC VALIDATION FAILED"); // TODO
         memset(cipher->last_header, 0, header_len);
         JDM_LEAVE_FUNCTION;
         return -1;

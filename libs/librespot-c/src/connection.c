@@ -2,6 +2,7 @@
 #include <sys/socket.h>
 
 #include <pthread.h>
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 #ifdef HAVE_SYS_UTSNAME_H
@@ -35,7 +36,8 @@ struct ap_entry {
     char *address;
     uint16_t port;
 };
-static pthread_rwlock_t ap_cache_lock;
+static pthread_mutex_t ap_cache_lock;
+static bool ap_cache_writing;
 bool lock_init = false;
 static struct ap_entry *ap_cache = NULL;
 static size_t ap_cache_len = 0;
@@ -98,12 +100,7 @@ connection_init_lock(){
     if (lock_init) return;
     JDM_ENTER_FUNCTION;
     lock_init = true;
-    pthread_rwlockattr_t attr;
-    pthread_rwlockattr_init(&attr);
-#if _XOPEN_SOURCE >= 500 || _POSIX_C_SOURCE >= 200809L
-    pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP);
-#endif
-    pthread_rwlock_init(&ap_cache_lock, &attr);
+    ap_cache_lock = (pthread_mutex_t) PTHREAD_MUTEX_INITIALIZER;
     JDM_LEAVE_FUNCTION;
 }
 
@@ -112,7 +109,7 @@ connection_free_lock(){
     if (!lock_init) return;
     JDM_ENTER_FUNCTION;
     lock_init = false;
-    pthread_rwlock_destroy(&ap_cache_lock);
+    pthread_mutex_destroy(&ap_cache_lock);
     free(ap_cache);
     ap_cache = NULL;
     JDM_LEAVE_FUNCTION;
@@ -152,9 +149,7 @@ system_info_from_uname(SystemInfo *system_info)
 #else
 
 static void
-system_info_from_uname(SystemInfo *system_info) {
-    return;
-}
+system_info_from_uname(SystemInfo *system_info) {}
 
 #endif
 
@@ -181,8 +176,8 @@ format_is_preferred(AudioFile *a, AudioFile *b, enum sp_bitrates bitrate_preferr
             else
                 return (a->format < b->format); // Prefer lowest
         case SP_BITRATE_320:
-            return (a->format > b->format); // Prefer highest
         case SP_BITRATE_ANY:
+            return (a->format > b->format); // Prefer highest
             return (a->format > b->format); // This case shouldn't happen, so this is mostly to avoid compiler warnings
     }
 
@@ -236,7 +231,10 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
     char *body = NULL;
     int ret;
 
-    pthread_rwlock_rdlock(&ap_cache_lock);
+    if (ap_cache_writing){
+        pthread_mutex_lock(&ap_cache_lock);
+        pthread_mutex_unlock(&ap_cache_lock);
+    }
 
     if (ap_cache) {
         for (int j = 0; j < ap_cache_len; ++j) {
@@ -244,25 +242,27 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
                 continue;
             *address = ap_cache[j].address;
             *port = ap_cache[j].port;
-            pthread_rwlock_unlock(&ap_cache_lock);
+            JDM_LEAVE_FUNCTION;
             return 0;
         }
         RETURN_ERROR(SP_ERR_NOCONNECTION, "No valid access points left");
     }
-    pthread_rwlock_unlock(&ap_cache_lock);
-    pthread_rwlock_wrlock(&ap_cache_lock);
+
+    pthread_mutex_lock(&ap_cache_lock);
 
     if (ap_cache) {
+        pthread_mutex_unlock(&ap_cache_lock);
         for (int j = 0; j < ap_cache_len; ++j) {
             if (avoid && strncmp(avoid, ap_cache[j].address, strlen(avoid)) == 0)
                 continue;
             *address = ap_cache[j].address;
             *port = ap_cache[j].port;
-            pthread_rwlock_unlock(&ap_cache_lock);
+            JDM_LEAVE_FUNCTION;
             return 0;
         }
         RETURN_ERROR(SP_ERR_NOCONNECTION, "No valid access points left");
     }
+    ap_cache_writing = true;
 
     ret = sp_cb.https_get(&body, SP_AP_RESOLVE_HOST);
     if (ret < 0)
@@ -298,13 +298,15 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
         prev_sep = sep + 1;
     }
 
-    pthread_rwlock_unlock(&ap_cache_lock);
+    ap_cache_writing = false;
+    pthread_mutex_unlock(&ap_cache_lock);
     free(body);
     JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
-    pthread_rwlock_unlock(&ap_cache_lock);
+    ap_cache_writing = false;
+    pthread_mutex_unlock(&ap_cache_lock);
     free(body);
     JDM_LEAVE_FUNCTION;
     return ret;
@@ -413,6 +415,7 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
     //event_add(conn->response_ev, NULL);
 
     conn->is_connected = true;
+    JDM_LEAVE_FUNCTION;
 
     return 0;
 
@@ -466,13 +469,13 @@ ap_address_get(struct sp_connection *conn) {
 
 /* ------------------------------ Raw packets ------------------------------- */
 
-static ssize_t
+static size_t
 packet_make_encrypted(uint8_t *out, size_t out_len, uint8_t cmd, const uint8_t *payload, size_t payload_len,
                       struct crypto_cipher *cipher) {
     JDM_ENTER_FUNCTION;
     uint16_t be;
     size_t plain_len;
-    ssize_t pkt_len;
+    size_t pkt_len;
     uint8_t *ptr;
 
     be = htobe16(payload_len);
@@ -502,12 +505,12 @@ packet_make_encrypted(uint8_t *out, size_t out_len, uint8_t cmd, const uint8_t *
     return -1;
 }
 
-static ssize_t
+static size_t
 packet_make_plain(uint8_t *out, size_t out_len, uint8_t *protobuf, size_t protobuf_len, bool add_version_header) {
     JDM_ENTER_FUNCTION;
     const uint8_t version_header[] = {0x00, 0x04};
     size_t header_len;
-    ssize_t len;
+    size_t len;
     uint32_t be;
 
     header_len = add_version_header ? sizeof(be) + sizeof(version_header) : sizeof(be);
@@ -1032,7 +1035,7 @@ response_read(struct sp_session *session) {
 /* --------------------------- Outgoing messages ---------------------------- */
 
 // This message is constructed like librespot does it, see handshake.rs
-static ssize_t
+static size_t
 msg_make_client_hello(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     ClientHello client_hello = CLIENT_HELLO__INIT;
@@ -1099,7 +1102,7 @@ client_response_crypto(uint8_t **challenge, size_t *challenge_len, struct sp_con
     return ret;
 }
 
-static ssize_t
+static size_t
 msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     ClientResponsePlaintext client_response = CLIENT_RESPONSE_PLAINTEXT__INIT;
@@ -1107,7 +1110,7 @@ msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_sessi
     LoginCryptoDiffieHellmanResponse diffie_hellman = LOGIN_CRYPTO_DIFFIE_HELLMAN_RESPONSE__INIT;
     uint8_t *challenge;
     size_t challenge_len;
-    ssize_t len;
+    size_t len;
     int ret;
 
     ret = client_response_crypto(&challenge, &challenge_len, &session->conn);
@@ -1137,7 +1140,7 @@ msg_make_client_response_plaintext(uint8_t *out, size_t out_len, struct sp_sessi
     return len;
 }
 
-static ssize_t
+static size_t
 msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     ClientResponseEncrypted client_response = CLIENT_RESPONSE_ENCRYPTED__INIT;
@@ -1145,7 +1148,7 @@ msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_sessi
     SystemInfo system_info = SYSTEM_INFO__INIT;
     char system_information_string[64];
     char version_string[64];
-    ssize_t len;
+    size_t len;
 
     login_credentials.has_auth_data = 1;
     login_credentials.username = session->credentials.username;
@@ -1198,7 +1201,7 @@ msg_make_client_response_encrypted(uint8_t *out, size_t out_len, struct sp_sessi
 // Mercury is the protocol implementation for Spotify Connect playback control and metadata fetching. It works as a
 // PUB/SUB system, where you, as an audio sink, subscribes to the events of a specified user (playlist changes) but
 // also access various metadata normally fetched by external players (tracks metadata, playlists, artists, etc).
-static ssize_t
+static size_t
 msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
     JDM_ENTER_FUNCTION;
     Header header = HEADER__INIT;
@@ -1274,7 +1277,7 @@ msg_make_mercury_req(uint8_t *out, size_t out_len, struct sp_mercury *mercury) {
     return header_len + prefix_len + body_len;
 }
 
-static ssize_t
+static size_t
 msg_make_mercury_track_get(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     struct sp_mercury mercury = {0};
@@ -1299,7 +1302,7 @@ msg_make_mercury_track_get(uint8_t *out, size_t out_len, struct sp_session *sess
     return msg_make_mercury_req(out, out_len, &mercury);
 }
 
-static ssize_t
+static size_t
 msg_make_mercury_episode_get(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     struct sp_mercury mercury = {0};
@@ -1324,7 +1327,7 @@ msg_make_mercury_episode_get(uint8_t *out, size_t out_len, struct sp_session *se
     return msg_make_mercury_req(out, out_len, &mercury);
 }
 
-static ssize_t
+static size_t
 msg_make_audio_key_get(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     struct sp_channel *channel = session->now_streaming_channel;
@@ -1360,7 +1363,7 @@ msg_make_audio_key_get(uint8_t *out, size_t out_len, struct sp_session *session)
     return required_len;
 }
 
-static ssize_t
+static size_t
 msg_make_chunk_request(uint8_t *out, size_t out_len, struct sp_session *session) {
     JDM_ENTER_FUNCTION;
     struct sp_channel *channel = session->now_streaming_channel;
@@ -1500,7 +1503,7 @@ int
 msg_send(struct sp_message *msg, struct sp_connection *conn) {
     JDM_ENTER_FUNCTION;
     uint8_t pkt[4096];
-    ssize_t pkt_len;
+    size_t pkt_len;
     int ret;
 
     if (conn->is_encrypted)

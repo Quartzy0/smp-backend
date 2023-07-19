@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <signal.h>
+#define JDM_STACKTRACE
 #include <jdm.h>
 #include "spotify.h"
 #include "util.h"
@@ -120,7 +121,7 @@ client_read_cb(struct bufferevent *bev, void *ctx){
                 evbuffer_drain(input, 3 + expected_len);
                 break;
             }
-            if (in_len < 3 + expected_len) return; // Not enough data
+            if (in_len < 3 + expected_len) break; // Not enough data
 
             struct worker_request req = {0};
             req.type = RECOMMENDATIONS;
@@ -233,12 +234,12 @@ int main(int argc, char **argv) {
     print_config(&config);
 
     // Create needed directories
-    mkdir("music_info", 0777);
-    mkdir("music_cache", 0777);
-    mkdir("album_info", 0777);
-    mkdir("playlist_info", 0777);
+    mkdir(config.music_info_cache_path, 0777);
+    mkdir(config.music_data_cache_path, 0777);
+    mkdir(config.album_info_cache_path, 0777);
+    mkdir(config.playlist_info_cache_path, 0777);
 
-    spotify_init(argc, argv);
+    spotify_init(argc - (argc>1), &argv[(argc>1)]);
 
     struct worker_pool worker_pool;
     worker_pool.worker_count = config.worker_threads;

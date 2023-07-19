@@ -8,7 +8,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include <jdm.h>
 
 size_t get_mul(char c) {
     switch (c) {
@@ -107,12 +106,10 @@ parse_config(const char *file, struct smp_config *config_out) {
         PARSE_NUM_PROPERTY(config_out, playlist_info_cache_max, -1);
     }
     PARSE_STRING_PROPERTY(config_out, global_cache_path, NULL, NULL);
-    if (!config_out->global_cache_path) {
-        PARSE_STRING_PROPERTY(config_out, music_info_cache_path, config_out->global_cache_path, "music_info");
-        PARSE_STRING_PROPERTY(config_out, music_data_cache_path, config_out->global_cache_path, "music_cache");
-        PARSE_STRING_PROPERTY(config_out, album_info_cache_path, config_out->global_cache_path, "album_info");
-        PARSE_STRING_PROPERTY(config_out, playlist_info_cache_path, config_out->global_cache_path, "playlist_info");
-    }
+    PARSE_STRING_PROPERTY(config_out, music_info_cache_path, config_out->global_cache_path, "music_info");
+    PARSE_STRING_PROPERTY(config_out, music_data_cache_path, config_out->global_cache_path, "music_cache");
+    PARSE_STRING_PROPERTY(config_out, album_info_cache_path, config_out->global_cache_path, "album_info");
+    PARSE_STRING_PROPERTY(config_out, playlist_info_cache_path, config_out->global_cache_path, "playlist_info");
 
     int cpu_cores = get_cpu_cores();
     PARSE_NUM_PROPERTY(config_out, worker_threads, cpu_cores-1);
@@ -121,8 +118,8 @@ parse_config(const char *file, struct smp_config *config_out) {
     return 0;
 }
 
-#define PRINT_PROPERTY_INT(g, p) printf(#p":%zu\n", (g)->p)
-#define PRINT_PROPERTY_STRING(g, p) printf(#p":%s\n", (g)->p)
+#define PRINT_PROPERTY_INT(g, p) JDM_INFO(#p":%zu", (g)->p)
+#define PRINT_PROPERTY_STRING(g, p) JDM_INFO(#p":%s", (g)->p)
 
 void
 print_config(struct smp_config *config) {

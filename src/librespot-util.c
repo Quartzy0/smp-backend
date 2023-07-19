@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <openssl/ssl.h>
+#define JDM_STACKTRACE
 #include <jdm.h>
 
 static const char data[] = "GET / HTTP/1.1\r\nHost: APResolve.spotify.com\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n";

@@ -162,7 +162,7 @@ struct sp_message {
 
     int (*response_handler)(uint8_t *msg, size_t msg_len, struct sp_session *session);
 
-    ssize_t len;
+    size_t len;
     uint8_t data[4096];
 };
 

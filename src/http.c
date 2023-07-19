@@ -3,12 +3,10 @@
 //
 
 #include "http.h"
-#include "util.h"
 #include <event2/bufferevent_ssl.h>
 #include <event2/http.h>
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
-#include <curl/curl.h>
 #include <unistd.h>
 #include <ctype.h>
 #include "openssl_hostname_validation.h"
@@ -212,6 +210,7 @@ token_get_completed_cb(struct evhttp_request *req, void *arg) {
     evbuffer_copyout_from(buf, &ptr, &pool->token[SPOTIFY_TOKEN_HEADER_PREFIX_LEN], token_len - SPOTIFY_TOKEN_HEADER_PREFIX_LEN - 1);
     pool->token[token_len-1] = 0;
     memcpy(pool->token, SPOTIFY_TOKEN_HEADER_PREFIX, SPOTIFY_TOKEN_HEADER_PREFIX_LEN);
+    pool->fetching_token = false;
 
     JDM_TRACE("Got token: %s", pool->token);
     dispatch_all_queued_requests(pool);
@@ -220,6 +219,7 @@ token_get_completed_cb(struct evhttp_request *req, void *arg) {
 
     fail:
     JDM_TRACE("Unable to get token, retrying");
+    pool->fetching_token = false;
     make_token_request(pool);
     JDM_LEAVE_FUNCTION;
 }
@@ -227,10 +227,12 @@ token_get_completed_cb(struct evhttp_request *req, void *arg) {
 static int
 dispatch_request_state_on_token(struct http_connection_pool *pool, struct request_state *state) {
     JDM_ENTER_FUNCTION;
-    if (pool->token)
+    if (pool->token){
+        JDM_LEAVE_FUNCTION;
         return http_dispatch_request_state(state);
-    else
+    }else {
         make_token_request(pool);
+    }
 
     if (pool->fetching_token)
         vec_add(&pool->queued_requests, state);

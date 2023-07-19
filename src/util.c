@@ -204,7 +204,7 @@ delete_oldest_until_size_requirement(size_t size_requirement, ...) {
 #include <sys/sysctl.h>
 #else
 #include <ctype.h>
-#include <sigsegv.h>
+#include <signal.h>
 
 #endif
 
@@ -256,7 +256,8 @@ int error_message_hook(const char *thread_name, uint32_t stack_trace_count, cons
             break;
         }
         case JDM_MESSAGE_LEVEL_ERR:
-        case JDM_MESSAGE_LEVEL_CRIT: {
+        case JDM_MESSAGE_LEVEL_CRIT:
+        case JDM_MESSAGE_LEVEL_FATAL: {
             fprintf(stderr, "%s [%s] %s:%d %s: %s\n", jdm_message_level_str(level), thread_name, file, line, function, message);
             for (size_t j = stack_trace_count - 1; j > 0; --j) {
                 fprintf(stderr, "\t^- %s\n", stack_trace[j]);
@@ -281,6 +282,7 @@ void sigsegv_handler(int sig){
     write(STDERR_FILENO, sigsegv_message_prefix, sizeof(sigsegv_message_prefix));
     write(STDERR_FILENO, thread_name, strlen(thread_name));
     write(STDERR_FILENO, sigsegv_message, sizeof(sigsegv_message));
+    if (!stack_trace || stack_trace_count == 0) exit(EXIT_FAILURE);
 
     static const char function_prefix[] = {'\t', '^', '-', ' '};
     static const char newline = '\n';
