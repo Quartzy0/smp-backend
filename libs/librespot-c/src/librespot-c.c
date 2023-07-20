@@ -502,16 +502,6 @@ track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
     JDM_ENTER_FUNCTION;
     struct sp_channel *channel;
     int ret;
-    struct track_pause_close_wrapper *wrapper = NULL;
-    if(close){
-        wrapper = calloc(1, sizeof(*wrapper));
-        wrapper->session = session;
-        if(data) memcpy(&wrapper->orig, data, sizeof(*data));
-        session->cmd_data.cb = track_close;
-        session->cmd_data.userp = wrapper;
-    }else{
-        memcpy(&session->cmd_data, data, sizeof(*data));
-    }
 
     channel = session->now_streaming_channel;
     if (!channel || channel->state == SP_CHANNEL_STATE_UNALLOCATED)
@@ -528,11 +518,14 @@ track_pause(struct cmd_data *data, struct sp_session *session, bool close) {
     channel_pause(channel);
     session->msg_type_next = MSG_TYPE_NONE;
 
+    if (close){
+        track_close(0, session);
+    }
+
     JDM_LEAVE_FUNCTION;
     return 0;
 
     error:
-    free(wrapper);
     memset(&session->cmd_data, 0, sizeof(session->cmd_data));
     JDM_LEAVE_FUNCTION;
     return 1;
@@ -570,15 +563,13 @@ track_seek(struct cmd_data *cmd_data, struct sp_session *session, size_t seek_po
 void
 track_close(int ret, void *userp) {
     JDM_ENTER_FUNCTION;
-    struct track_pause_close_wrapper *wrapper = (struct track_pause_close_wrapper*) userp;
-    struct sp_session *session = wrapper->session;
+    struct sp_session *session = (struct sp_session*) userp;
 
     channel_stop(session->now_streaming_channel);
     channel_free(session->now_streaming_channel);
     session->now_streaming_channel = NULL;
 
-    if (wrapper->orig.cb) wrapper->orig.cb(ret, wrapper->orig.userp);
-    free(wrapper);
+    if (session->cmd_data.cb) session->cmd_data.cb(ret, session->cmd_data.userp);
     JDM_LEAVE_FUNCTION;
 }
 

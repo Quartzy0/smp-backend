@@ -110,6 +110,10 @@ connection_free_lock(){
     JDM_ENTER_FUNCTION;
     lock_init = false;
     pthread_mutex_destroy(&ap_cache_lock);
+    for (int i = 0; i < ap_cache_len; ++i) {
+        free(ap_cache[i].address);
+        ap_cache[i].address = NULL;
+    }
     free(ap_cache);
     ap_cache = NULL;
     JDM_LEAVE_FUNCTION;

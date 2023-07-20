@@ -128,6 +128,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                             fd_vec_add(&element->fd_vec, req.client_fd);
                             JDM_TRACE("Sending data for '%.22s' from cache while reading", req.regioned_id.id);
                             fclose(fp);
+                            free(path);
                             break;
                         } else {
                             progress = actual_len - sizeof(tmp_data);
@@ -135,6 +136,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                     } else {
                         JDM_TRACE("Sending data for '%.22s' from cache", req.regioned_id.id);
                         fclose(fp);
+                        free(path);
                         break;
                     }
                 }

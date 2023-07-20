@@ -87,6 +87,8 @@ clean_element(struct element *element) {
     JDM_ENTER_FUNCTION;
     if (element->session) {
         librespotc_close(element->session);
+        librespotc_logout(element->session);
+        element->session = NULL;
     }
     fd_vec_free(&element->fd_vec);
     if (element->read_ev) event_free(element->read_ev);
@@ -297,7 +299,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
                 pool->elements[i].progress = progress;
                 pool->elements[i].file_len = file_len;
                 memcpy(pool->elements[i].id, id, sizeof(pool->elements[i].id));
-                pool->elements[i].path = strdup(path);
+                pool->elements[i].path = path;
                 fd_vec_init(&pool->elements[i].fd_vec);
                 fd_vec_add(&pool->elements[i].fd_vec, fd);
                 pool->elements[i].cache_fp = fopen(pool->elements[i].path, "a");
@@ -318,7 +320,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
         pool->elements[uninit].file_len = file_len;
         fd_vec_init(&pool->elements[uninit].fd_vec);
         fd_vec_add(&pool->elements[uninit].fd_vec, fd);
-        pool->elements[uninit].path = strdup(path);
+        pool->elements[uninit].path = path;
         pool->elements[uninit].base = base;
         pool->elements[uninit].read_ev = NULL;
         pool->elements[uninit].active = true;

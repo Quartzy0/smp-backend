@@ -153,6 +153,7 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
             worker_send_request(container->worker, &req);
         }
         bufferevent_free(bev);
+        free(ctx);
         JDM_TRACE("Client disconnected");
     }
     JDM_LEAVE_FUNCTION;
