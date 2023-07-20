@@ -106,10 +106,10 @@ parse_config(const char *file, struct smp_config *config_out) {
         PARSE_NUM_PROPERTY(config_out, playlist_info_cache_max, -1);
     }
     PARSE_STRING_PROPERTY(config_out, global_cache_path, NULL, NULL);
-    PARSE_STRING_PROPERTY(config_out, music_info_cache_path, config_out->global_cache_path, "music_info");
-    PARSE_STRING_PROPERTY(config_out, music_data_cache_path, config_out->global_cache_path, "music_cache");
-    PARSE_STRING_PROPERTY(config_out, album_info_cache_path, config_out->global_cache_path, "album_info");
-    PARSE_STRING_PROPERTY(config_out, playlist_info_cache_path, config_out->global_cache_path, "playlist_info");
+    PARSE_STRING_PROPERTY(config_out, music_info_cache_path, config_out->global_cache_path, "music_info/");
+    PARSE_STRING_PROPERTY(config_out, music_data_cache_path, config_out->global_cache_path, "music_cache/");
+    PARSE_STRING_PROPERTY(config_out, album_info_cache_path, config_out->global_cache_path, "album_info/");
+    PARSE_STRING_PROPERTY(config_out, playlist_info_cache_path, config_out->global_cache_path, "playlist_info/");
 
     int cpu_cores = get_cpu_cores();
     PARSE_NUM_PROPERTY(config_out, worker_threads, cpu_cores-1);

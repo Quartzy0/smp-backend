@@ -4,6 +4,7 @@
 
 #include "spotify.h"
 #include "util.h"
+#include "vec.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -99,9 +100,9 @@ static void
 session_error(
         struct sp_session *session, enum sp_error err,
         void *userp) { // On session error, create a new session in its place and continue playing the previous song
-    if (err == SP_ERR_NOCONNECTION) return;
-    JDM_ENTER_FUNCTION;
     struct element *element = (struct element *) userp;
+    if (err == SP_ERR_NOCONNECTION || !element->session) return;
+    JDM_ENTER_FUNCTION;
     if (err == SP_ERR_TRACK_NOT_FOUND){
         JDM_TRACE("Track not found error: '%s'", element->id);
         for (int i = 0; i < element->fd_vec.len; ++i) {
@@ -242,12 +243,12 @@ spotify_file_open_cb(int fd, void *userp) {
 
     JDM_TRACE("Opened spotify track (%d)", fd);
 
+    if (!element->file_len) element->file_len = librespotc_get_filelen(element->session);
     if (element->progress) {
         librespotc_seek(element->session, element->progress, finish_seek_cb, userp);
         JDM_LEAVE_FUNCTION;
         return;
     }
-    element->file_len = librespotc_get_filelen(element->session);
     finish_seek_cb(0, userp);
     JDM_LEAVE_FUNCTION;
 }
@@ -285,9 +286,8 @@ session_cb(int ret, void *userp) {
 }
 
 struct element *
-spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd,
-                         const char *region, audio_finished_cb cb, void *cb_arg,
-                         struct event_base *base) {
+spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd, const char *region,
+                         audio_finished_cb cb, void *cb_arg, struct event_base *base, size_t file_len) {
     JDM_ENTER_FUNCTION;
     int uninit = -1;
     for (int i = 0; i < SESSION_POOL_MAX; ++i) {
@@ -295,6 +295,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
             if (pool->elements[i].session) {
                 pool->elements[i].active = true;
                 pool->elements[i].progress = progress;
+                pool->elements[i].file_len = file_len;
                 memcpy(pool->elements[i].id, id, sizeof(pool->elements[i].id));
                 pool->elements[i].path = strdup(path);
                 fd_vec_init(&pool->elements[i].fd_vec);
@@ -314,6 +315,7 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
         struct credentials *creds = get_credentials();
         JDM_TRACE("Creating new session as %s", creds->creds.username);
         pool->elements[uninit].progress = progress;
+        pool->elements[uninit].file_len = file_len;
         fd_vec_init(&pool->elements[uninit].fd_vec);
         fd_vec_add(&pool->elements[uninit].fd_vec, fd);
         pool->elements[uninit].path = strdup(path);
@@ -384,34 +386,36 @@ audio_read_cb(int fd, short what, void *arg) {
 
     got = read(fd, &wj->tmp[wj->current_buf][wj->offset], MAX_BYTES_PER_READ);
 
+    if (element->progress + got > element->file_len){
+        got = element->file_len - element->progress;
+    }
     element->progress += got;
     if (got > 0){
         for (int i = 0; i < element->fd_vec.len; ++i) {
             if(element->fd_vec.el[i] != -1) write(element->fd_vec.el[i], &wj->tmp[wj->current_buf][wj->offset], got);
         }
         if (element->cache_fp){
-            if (MAX_WRITE_BUFFER_SIZE - (wj->offset + got) < MAX_BYTES_PER_READ*2){
+            wj->offset += got;
+            if (MAX_WRITE_BUFFER_SIZE - (wj->offset) < MAX_BYTES_PER_READ*2){
                 while (aio_error(&wj->cb) == EINPROGRESS) {} // Wait for write job to finish if still in progress
                 wj->cb.aio_buf = wj->tmp[wj->current_buf];
-                wj->cb.aio_nbytes = wj->offset + got;
+                wj->cb.aio_nbytes = wj->offset;
                 aio_write(&wj->cb);
                 wj->offset = 0;
                 wj->current_buf = !wj->current_buf;
-            }else{
-                wj->offset += got;
             }
         }
     }
     if (got <= 0 || element->progress >= element->file_len) {
-        JDM_TRACE("Playback ended (%zu)", got);
+        JDM_TRACE("Playback ended '%s'", element->id);
         event_free(element->read_ev);
         element->read_ev = NULL;
         librespotc_close(element->session);
         if (element->cache_fp){
             while (aio_error(&wj->cb) == EINPROGRESS) {}
-            if (wj->offset){
+            if (wj->offset != 0){
                 wj->cb.aio_buf = wj->tmp[wj->current_buf];
-                wj->cb.aio_nbytes = wj->offset + got;
+                wj->cb.aio_nbytes = wj->offset;
                 aio_write(&wj->cb);
                 while (aio_error(&wj->cb) == EINPROGRESS) {}
             }

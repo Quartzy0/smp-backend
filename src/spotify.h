@@ -8,7 +8,6 @@
 #include "librespot-util.h"
 #include "stdbool.h"
 #include "util.h"
-#include "vec.h"
 #include <event2/bufferevent.h>
 
 extern char *available_regions;
@@ -51,9 +50,8 @@ struct session_pool {
 int spotify_init(int argc, char **argv);
 
 struct element *
-spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd,
-                         const char *region, audio_finished_cb cb, void *cb_arg,
-                         struct event_base *base);
+spotify_activate_session(struct session_pool *pool, size_t progress, char *id, char *path, int fd, const char *region,
+                         audio_finished_cb cb, void *cb_arg, struct event_base *base, size_t file_len);
 
 void spotify_update_available_regions();
 

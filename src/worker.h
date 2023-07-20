@@ -9,6 +9,7 @@
 #include "vec.h"
 #include "http.h"
 #include "spotify.h"
+#include "config.h"
 
 #define WORKER_HASH_TABLE_BUCKETS 50
 
@@ -51,6 +52,7 @@ struct worker{
     pthread_t tid;
     int cmd[2];
     int id; // Maybe useful for debug purposes
+    struct smp_config *cfg;
 
     struct event_base *base;
     struct event *cmd_ev;

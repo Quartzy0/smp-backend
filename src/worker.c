@@ -92,15 +92,17 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
     read(wrk_fd, &req, sizeof(req));
     switch (req.type) {
         case MUSIC_DATA: {
-            char path[35] = "music_cache/";
-            memcpy(&path[12], req.regioned_id.id, 22);
-            path[34] = 0;
+            size_t music_cache_len = strlen(worker->cfg->music_data_cache_path);
+            char *path = malloc(music_cache_len + 22 + 1);
+
+            memcpy(path, worker->cfg->music_data_cache_path, music_cache_len);
+            memcpy(&path[music_cache_len], req.regioned_id.id, 22);
+            path[music_cache_len+22] = 0;
             worker->job_count++;
 
-            size_t progress = 0;
+            size_t progress = 0, file_len = 0;
             if (!access(path, R_OK)) {
                 FILE *fp = fopen(path, "r");
-                size_t file_len;
                 char tmp_data[1 + sizeof(file_len)];
                 size_t bytes_read = fread(tmp_data, sizeof(tmp_data), 1, fp);
                 file_len = *((size_t *) &tmp_data[1]); // Skip first byte
@@ -124,23 +126,24 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                         }
                         if (element) {
                             fd_vec_add(&element->fd_vec, req.client_fd);
-                            JDM_TRACE("[worker %d] Sending data for '%.22s' from cache while reading", worker->id, req.regioned_id.id);
+                            JDM_TRACE("Sending data for '%.22s' from cache while reading", req.regioned_id.id);
                             fclose(fp);
                             break;
                         } else {
                             progress = actual_len - sizeof(tmp_data);
                         }
-                        fclose(fp);
                     } else {
-                        JDM_TRACE("[worker %d] Sending data for '%.22s' from cache", worker->id, req.regioned_id.id);
+                        JDM_TRACE("Sending data for '%.22s' from cache", req.regioned_id.id);
                         fclose(fp);
                         break;
                     }
                 }
             }
-            JDM_TRACE("[worker %d] Sending data for '%.22s'", worker->id, req.regioned_id.id);
+            JDM_TRACE("Sending data for '%.22s'", req.regioned_id.id);
 
-            spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd, req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb, worker, worker->base);
+            spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd,
+                                     req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb,
+                                     worker, worker->base, file_len);
             break;
         }
         case MUSIC_INFO: {

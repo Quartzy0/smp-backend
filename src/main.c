@@ -247,6 +247,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < worker_pool.worker_count; ++i) {
         worker_init(&worker_pool.workers[i]);
         worker_pool.workers[i].id = i;
+        worker_pool.workers[i].cfg = &config;
     }
 
     struct event_base *base = NULL;
