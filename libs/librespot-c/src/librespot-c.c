@@ -87,18 +87,19 @@ session_free(struct sp_session *session) {
 
     ap_disconnect(&session->conn);
 
-    event_free(session->continue_ev);
-    session->continue_ev = NULL;
+    if (session->continue_ev){
+        event_free(session->continue_ev);
+        session->continue_ev = NULL;
+    }
 
     free(session->ap_avoid);
+    memset(session, 0, sizeof(*session));
     free(session);
     JDM_LEAVE_FUNCTION;
 }
 
 static void
 session_cleanup(struct sp_session *session) {
-    struct sp_session *s;
-
     if (!session)
         return;
     JDM_ENTER_FUNCTION;
@@ -645,6 +646,7 @@ login(struct sp_session **session, struct cmd_data *cmd, const char *username, c
 
     error:
     session_cleanup(*session);
+    *session = NULL;
 
     JDM_LEAVE_FUNCTION;
     return 1;

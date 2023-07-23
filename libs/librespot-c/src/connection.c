@@ -268,7 +268,11 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
     }
     ap_cache_writing = true;
 
-    ret = sp_cb.https_get(&body, SP_AP_RESOLVE_HOST);
+    int retries = 0;
+    do{
+        ret = sp_cb.https_get(&body, SP_AP_RESOLVE_HOST);
+        retries++;
+    }while(retries < 3 && (ret < 0 || strlen(body) == 0));
     if (ret < 0)
         RETURN_ERROR(SP_ERR_NOCONNECTION, "Could not connect to access point resolver");
 
@@ -352,7 +356,7 @@ connection_clear(struct sp_connection *conn) {
 void
 ap_disconnect(struct sp_connection *conn) {
     JDM_ENTER_FUNCTION;
-    if (conn->is_connected){
+    if (conn->response_bev){
 //        sp_cb.tcp_disconnect(conn->response_fd);
         bufferevent_free(conn->response_bev);
         conn->response_bev = NULL;
@@ -1053,7 +1057,7 @@ msg_make_client_hello(uint8_t *out, size_t out_len, struct sp_session *session) 
 
     build_info.product = PRODUCT__PRODUCT_PARTNER;
     build_info.platform = PLATFORM__PLATFORM_LINUX_X86;
-    build_info.version = 109800078;
+    build_info.version = 117300517;
 
     diffie_hellman.gc.len = sizeof(session->conn.keys.public_key);
     diffie_hellman.gc.data = session->conn.keys.public_key;

@@ -22,7 +22,11 @@ https_get(char **body, const char *host_str) {
                   SOCK_STREAM, /* TCP socket. */
                   0); /* O for socket() function choose the correct protocol based on the socket type. */
 
-    if(sock == -1) return -1;
+    if(sock == -1){
+        JDM_ERROR("Error when making socket");
+        JDM_LEAVE_FUNCTION;
+        return -1;
+    }
     struct addrinfo hints = {
             .ai_family = AF_INET,
             .ai_socktype = SOCK_STREAM,

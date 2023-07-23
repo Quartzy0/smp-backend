@@ -343,6 +343,10 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
                                          creds->creds.stored_cred_len, &pool->elements[uninit].session, session_cb,
                                          &pool->elements[uninit], pool->elements[uninit].base);
         }
+        if (!pool->elements[uninit].session){
+            JDM_ERROR("Error when creating session: %s", librespotc_last_errmsg());
+            return NULL;
+        }
         librespotc_session_error_cb(pool->elements[uninit].session, session_error, &pool->elements[uninit]);
         creds->uses++;
         JDM_LEAVE_FUNCTION;

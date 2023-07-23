@@ -373,6 +373,7 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
         }
         fclose(state->fp);
     }
+    if (state->cb) state->cb(state->userp);
     free(arg);
     JDM_LEAVE_FUNCTION;
 }
@@ -436,6 +437,8 @@ http_dispatch_request(struct http_connection_pool *pool, const char *uri_in, int
     state->connection = connection;
     state->pool = pool;
     state->api = api;
+    state->cb = cb;
+    state->userp = userp;
     memcpy(state->request, uri_in, (strlen(uri_in) + 1) > URI_MAX_LEN ? URI_MAX_LEN : (strlen(uri_in) + 1));
     state->token = pool->token;
     if (fp) {
