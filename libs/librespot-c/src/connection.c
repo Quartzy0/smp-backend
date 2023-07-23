@@ -1055,7 +1055,7 @@ msg_make_client_hello(uint8_t *out, size_t out_len, struct sp_session *session) 
     uint8_t nonce[16] = {0};
     size_t len;
 
-    build_info.product = PRODUCT__PRODUCT_PARTNER;
+    build_info.product = PRODUCT__PRODUCT_CLIENT;
     build_info.platform = PLATFORM__PLATFORM_LINUX_X86;
     build_info.version = 117300517;
 
