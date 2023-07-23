@@ -8,6 +8,8 @@
 #include <stdio.h>
 #include <event2/event.h>
 #include <sys/sendfile.h>
+#include <event2/bufferevent.h>
+#include <event2/buffer.h>
 
 #include "spotify.h"
 #include "http.h"
@@ -84,6 +86,51 @@ http_request_finished(void *arg){
     worker->job_count--;
 }
 
+struct music_data_write_data{
+    struct worker *worker;
+    struct worker_request req;
+    size_t file_len;
+    size_t progress;
+    size_t actual_len;
+    size_t bytes_read;
+    char *path;
+    FILE *fp;
+};
+
+static void
+file_written_cb(struct bufferevent *bev, void *param){
+    JDM_ENTER_FUNCTION;
+    struct music_data_write_data *data = (struct music_data_write_data*) param;
+
+    if (!data->bytes_read || data->file_len != data->actual_len - data->bytes_read) { // Check if file is fully written
+        struct element *element = NULL;
+        for (int i = 0; i < SESSION_POOL_MAX; ++i) {
+            if (!memcmp(data->worker->session_pool.elements[i].id, data->req.regioned_id.id, sizeof(data->worker->session_pool.elements[i].id))) {
+                element = &data->worker->session_pool.elements[i];
+                break;
+            }
+        }
+        if (element) {
+            fd_vec_add(&element->fd_vec, data->req.client_fd);
+            JDM_TRACE("Sending data for '%.22s' from cache while reading", data->req.regioned_id.id);
+            free(data->path);
+        } else {
+            data->progress = data->actual_len - data->bytes_read;
+            spotify_activate_session(&data->worker->session_pool, data->progress, data->req.regioned_id.id, data->path, data->req.client_fd,
+                                     data->req.regioned_id.region[0] ? data->req.regioned_id.region : NULL, element_finished_cb,
+                                     data->worker, data->worker->base, data->file_len);
+        }
+    } else {
+        JDM_TRACE("Sending data for '%.22s' from cache", data->req.regioned_id.id);
+        free(data->path);
+    }
+
+    fclose(data->fp);
+    free(data);
+    bufferevent_free(bev);
+    JDM_LEAVE_FUNCTION;
+}
+
 static void
 cmd_read_cb(int wrk_fd, short what, void *arg) {
     JDM_ENTER_FUNCTION;
@@ -104,7 +151,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             if (!access(path, R_OK)) {
                 FILE *fp = fopen(path, "r");
                 char tmp_data[1 + sizeof(file_len)];
-                size_t bytes_read = fread(tmp_data, sizeof(tmp_data), 1, fp);
+                fread(tmp_data, sizeof(tmp_data), 1, fp);
                 file_len = *((size_t *) &tmp_data[1]); // Skip first byte
                 fseek(fp, 0L, SEEK_END);
                 size_t actual_len = ftell(fp);
@@ -114,31 +161,23 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                     fclose(fp); // File contains an error response (somehow)
                     remove(path);
                 } else{
+                    struct music_data_write_data *data = malloc(sizeof(*data));
+                    data->worker = worker;
+                    data->req = req;
+                    data->file_len = file_len;
+                    data->progress = progress;
+                    data->actual_len = actual_len;
+                    data->bytes_read = sizeof(tmp_data);
+                    data->fp = fp;
+                    data->path = path;
                     int fd = fileno(fp);
-                    sendfile(req.client_fd, fd, NULL, actual_len);
-                    if (!bytes_read || file_len != actual_len - sizeof(tmp_data)) { // Check if file is fully written
-                        struct element *element = NULL;
-                        for (int i = 0; i < SESSION_POOL_MAX; ++i) {
-                            if (!memcmp(worker->session_pool.elements[i].id, req.regioned_id.id, sizeof(worker->session_pool.elements[i].id))) {
-                                element = &worker->session_pool.elements[i];
-                                break;
-                            }
-                        }
-                        if (element) {
-                            fd_vec_add(&element->fd_vec, req.client_fd);
-                            JDM_TRACE("Sending data for '%.22s' from cache while reading", req.regioned_id.id);
-                            fclose(fp);
-                            free(path);
-                            break;
-                        } else {
-                            progress = actual_len - sizeof(tmp_data);
-                        }
-                    } else {
-                        JDM_TRACE("Sending data for '%.22s' from cache", req.regioned_id.id);
-                        fclose(fp);
-                        free(path);
-                        break;
-                    }
+
+                    struct bufferevent *bev = bufferevent_socket_new(worker->base, req.client_fd, 0);
+                    bufferevent_enable(bev, EV_WRITE);
+                    bufferevent_setcb(bev, NULL, file_written_cb, NULL, data);
+                    evbuffer_add_file(bufferevent_get_output(bev), fd, 0, -1);
+                    bufferevent_flush(bev, EV_WRITE, BEV_FINISHED);
+                    break;
                 }
             }
             JDM_TRACE("Sending data for '%.22s'", req.regioned_id.id);
