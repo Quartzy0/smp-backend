@@ -22,5 +22,6 @@ target_link_libraries(smp_backend librespot_c)
 target_link_libraries(smp_backend ${OPENSSL_LIBRARIES})
 target_link_libraries(smp_backend rt)
 
+set(JDM_BUILD_SHARED_LIBS OFF)
 add_subdirectory(libs/jdm)
 target_link_libraries(smp_backend jdm)

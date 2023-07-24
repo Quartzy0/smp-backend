@@ -43,7 +43,7 @@
 #define SP_AP_DISCONNECT_SECS 60
 
 // Max wait for AP to respond
-#define SP_AP_TIMEOUT_SECS 10
+#define SP_AP_TIMEOUT_SECS 5
 
 // After a disconnect we try to reconnect, but if we are disconnected yet again
 // we get the hint and won't try reconnecting again until after this cooldown
