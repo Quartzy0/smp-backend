@@ -270,6 +270,7 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
 
     int retries = 0;
     do{
+        free(body);
         ret = sp_cb.https_get(&body, SP_AP_RESOLVE_HOST);
         retries++;
     }while(retries < 3 && (ret < 0 || strlen(body) == 0));
@@ -278,7 +279,7 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
 
     char *arr_start = strchr(body, '[');
     if (!arr_start)
-        RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when paring json response");
+        RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when paring json response: Couldn't find array start");
     ap_cache_len = 1;
     {
         char *prev_comma = arr_start;
@@ -289,10 +290,10 @@ ap_resolve(char **address, unsigned short *port, const char *avoid) {
     for (int i = 0; i < ap_cache_len; ++i) {
         char *sep = strchr(prev_sep, ':');
         if (!sep)
-            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response");
+            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response: Couldn't find separator");
         const char *address_begin = reverse_find(prev_sep, '"', (int) (sep-prev_sep));
         if (!address_begin)
-            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response");
+            RETURN_ERROR(SP_ERR_NOCONNECTION, "Error when parsing json response: Couldn't find start of address");
         address_begin++;
         ap_cache[i].address = strndup(address_begin, sep-address_begin);
         ap_cache[i].port = (uint16_t) strtol(sep+1, NULL, 10);
@@ -384,7 +385,11 @@ connection_make(struct sp_connection *conn, const char *ap_avoid, struct sp_conn
     int ret;
 
     if (!conn->ap_address || !conn->ap_port) {
-        ret = ap_resolve(&conn->ap_address, &conn->ap_port, ap_avoid);
+        int retries = 0;
+        do {
+            ret = ap_resolve(&conn->ap_address, &conn->ap_port, ap_avoid);
+        }while(ret < 0 && ++retries<3);
+
         if (ret < 0)
             RETURN_ERROR(ret, sp_errmsg);
     }

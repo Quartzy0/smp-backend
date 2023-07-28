@@ -14,13 +14,66 @@
 #include "spotify.h"
 #include "http.h"
 #include "util.h"
+#include "hash_table.h"
 
+static const struct timeval client_timeout = {
+        .tv_usec = 0,
+        .tv_sec = 60
+};
 struct worker_hash_table worker_id_table;
 char region_url_insertion[] = "?market=";
 
+static int
+clients_fd_hash(void *key){
+    return (int) key;
+}
+
+static bool
+clients_fd_compare(void *key, void *key1){
+    return key == key1;
+}
+
+static void
+clients_fd_free(void *key, void *value){
+    event_free(value);
+}
+
+static void
+client_idle(int fd, short event, void *param){
+    JDM_ENTER_FUNCTION;
+    struct worker *worker = (struct worker*) param;
+    write(worker->msg_fd[1], &fd, sizeof(fd));
+    JDM_LEAVE_FUNCTION;
+}
+
+static void
+add_idle_event(struct worker *worker, int fd){
+    JDM_ENTER_FUNCTION;
+    struct event *ev = hash_table_get(worker->idle_table, (void*) fd);
+    if (ev){
+        event_add(ev, &client_timeout);
+    }else {
+        ev = event_new(worker->base, fd, 0, client_idle, worker);
+        event_add(ev, &client_timeout);
+        hash_table_put(worker->idle_table, (void*) fd, ev);
+    }
+    JDM_LEAVE_FUNCTION;
+}
+
+static void
+remove_idle_event(struct worker *worker, int fd){
+    JDM_ENTER_FUNCTION;
+    struct event *ev = hash_table_get(worker->idle_table, (void*) fd);
+    if (ev){
+        event_del(ev);
+    }
+    JDM_LEAVE_FUNCTION;
+}
+
 void
 http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool, const char *uri_in,
-                     const char *path_in, bool api, bool insert_id_url, http_request_finished_cb cb, void *userp) {
+                     const char *path_in, bool api, bool insert_id_url, struct worker *worker,
+                     http_request_finished_cb cb, void *userp) {
     JDM_ENTER_FUNCTION;
     char *uri;
     if (insert_id_url) {
@@ -49,6 +102,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
 
         if (len - sizeof(read_size) == read_size) {
             sendfile(fd, fileno(fp), NULL, len);
+            add_idle_event(worker, fd);
         } else {
             if (api) {
                 http_dispatch_request_api(http_connection_pool, insert_id_url ? uri : uri_in, fd,
@@ -76,14 +130,22 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
 
 void
 element_finished_cb(struct element *element, void *arg){
-    hash_table_remove(&worker_id_table, element->id);
-    ((struct worker*)arg)->job_count--;
+    struct worker *worker = (struct worker*) arg;
+
+    worker_hash_table_remove(&worker_id_table, element->id);
+    worker->job_count--;
+
+    for (int i = 0; i < element->fd_vec.len; ++i){
+        add_idle_event(worker, element->fd_vec.el[i]);
+    }
 }
 
 void
-http_request_finished(void *arg){
+http_request_finished(int fd, void *arg){
     struct worker *worker = (struct worker*) arg;
     worker->job_count--;
+
+    add_idle_event(worker, fd);
 }
 
 struct music_data_write_data{
@@ -122,6 +184,7 @@ file_written_cb(struct bufferevent *bev, void *param){
         }
     } else {
         JDM_TRACE("Sending data for '%.22s' from cache", data->req.regioned_id.id);
+        add_idle_event(data->worker, data->req.client_fd);
         free(data->path);
     }
 
@@ -146,6 +209,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             memcpy(&path[music_cache_len], req.regioned_id.id, 22);
             path[music_cache_len+22] = 0;
             worker->job_count++;
+            remove_idle_event(worker, req.client_fd);
 
             size_t progress = 0, file_len = 0;
             if (!access(path, R_OK)) {
@@ -188,18 +252,21 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case MUSIC_INFO: {
+            remove_idle_event(worker, req.client_fd);
             http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/tracks/",
-                                 "music_info/", true, true, http_request_finished, worker);
+                                 "music_info/", true, true, worker, http_request_finished, worker);
             break;
         }
         case PLAYLIST_INFO: {
+            remove_idle_event(worker, req.client_fd);
             http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/playlists/",
-                                 "playlist_info/", true, true, http_request_finished, worker);
+                                 "playlist_info/", true, true, worker, http_request_finished, worker);
             break;
         }
         case ALBUM_INFO: {
+            remove_idle_event(worker, req.client_fd);
             http_generic_request(req.generic_id, req.client_fd, &worker->http_connection_pool, "/v1/albums/",
-                                 "album_info/", true, true, http_request_finished, worker);
+                                 "album_info/", true, true, worker, http_request_finished, worker);
             break;
         }
         case ARTIST_INFO: {
@@ -209,6 +276,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case SEARCH: {
+            remove_idle_event(worker, req.client_fd);
             int flags = req.search_query.flags;
             size_t uri_len = 19 + (flags & 1) * 6 + (flags & 2) * 7 + (flags & 4) * 6 + (flags & 8) * 9 + strlen(req.search_query.generic_query) + 1;
             char *uri = calloc(uri_len, sizeof(*uri));
@@ -239,6 +307,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case RECOMMENDATIONS: {
+            remove_idle_event(worker, req.client_fd);
             uint8_t t = req.recommendation_seed.t, a = req.recommendation_seed.a;
             size_t uri_len = (t != 0) * (13 + t * 22 + (t - 1)) +
                              (a != 0) * (14 + a * 22 + (a - 1)) +
@@ -286,6 +355,8 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             for (int i = 0; i < element_len; ++i) {
                 if(fd_vec_remove_element(&worker->session_pool.elements[i].fd_vec, req.client_fd)) {
                     JDM_TRACE("Client disconnected (%d)", req.client_fd);
+                    struct event *ev = hash_table_remove(worker->idle_table, (void*) req.client_fd);
+                    if (ev) event_free(ev);
                     if (fd_vec_is_empty(&worker->session_pool.elements[i].fd_vec)){
                         JDM_TRACE("All clients for element streaming '%.22s' have disconnected", worker->session_pool.elements[i].id);
                         spotify_stop_element(&worker->session_pool.elements[i]);
@@ -296,6 +367,8 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case CLEANUP: {
+            hash_table_free(worker->idle_table);
+            free(worker->idle_table);
             http_cleanup(&worker->http_connection_pool);
             spotify_clean(&worker->session_pool);
             close(worker->cmd[1]);
@@ -337,7 +410,8 @@ worker_init(struct worker *worker) {
     JDM_ENTER_FUNCTION;
     memset(&worker->session_pool, 0, sizeof(worker->session_pool));
     http_init(&worker->http_connection_pool);
-    hash_table_init(&worker_id_table);
+    worker_hash_table_init(&worker_id_table);
+    hash_table_init(&worker->idle_table, clients_fd_hash, clients_fd_compare, clients_fd_free);
     pipe(worker->cmd);
     int ret = pthread_create(&worker->tid, NULL, worker_loop, worker);
     if (ret) {
@@ -383,7 +457,7 @@ hash(const char *name) {
 }
 
 void
-hash_table_remove(struct worker_hash_table *table, const char *key){
+worker_hash_table_remove(struct worker_hash_table *table, const char *key){
     JDM_ENTER_FUNCTION;
     unsigned long bucket_index = hash(key) % WORKER_HASH_TABLE_BUCKETS;
 
@@ -391,8 +465,8 @@ hash_table_remove(struct worker_hash_table *table, const char *key){
     struct worker_hash_table_bucket *bucket = &table->buckets[bucket_index];
     for (int i = 0; i < bucket->len; ++i) {
         if (bucket->elements && !memcmp(bucket->elements[i].key, key, 22)) {
-            if (i == bucket->len - 1) break;
-            memmove(&bucket->elements[i], &bucket->elements[i+1], bucket->len-(i+1));
+            if (i != bucket->len - 1)
+                memmove(&bucket->elements[i], &bucket->elements[i+1], bucket->len-(i+1));
             bucket->len--;
             break;
         }
@@ -401,7 +475,7 @@ hash_table_remove(struct worker_hash_table *table, const char *key){
     JDM_LEAVE_FUNCTION;
 }
 
-void hash_table_init(struct worker_hash_table *table) {
+void worker_hash_table_init(struct worker_hash_table *table) {
     if(table->initialized) return;
     table->initialized = true;
     memset(table, 0, sizeof(*table));
@@ -409,7 +483,7 @@ void hash_table_init(struct worker_hash_table *table) {
 }
 
 struct worker_hash_table_element *
-hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker) {
+worker_hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker) {
     JDM_ENTER_FUNCTION;
     unsigned long bucket_index = hash(key) % WORKER_HASH_TABLE_BUCKETS;
 
@@ -441,7 +515,7 @@ hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, stru
 }
 
 void
-hash_table_clean(struct worker_hash_table *table){
+worker_hash_table_clean(struct worker_hash_table *table){
     JDM_ENTER_FUNCTION;
     pthread_mutex_lock(&table->mutex);
     for (int i = 0; i < WORKER_HASH_TABLE_BUCKETS; ++i) {

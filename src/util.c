@@ -269,6 +269,7 @@ int error_message_hook(const char *thread_name, uint32_t stack_trace_count, cons
     return 0;
 }
 
+#ifdef HANDLE_SIGSEGV
 void sigsegv_handler(int sig){
     if (sig != SIGSEGV) return;
 
@@ -296,12 +297,17 @@ void sigsegv_handler(int sig){
     write(STDERR_FILENO, &newline, sizeof(newline));
     exit(EXIT_FAILURE);
 }
+#endif
 
 int set_sigsegv_handler() {
+#ifdef HANDLE_SIGSEGV
     struct sigaction action = {
             .sa_handler = sigsegv_handler,
             .sa_mask = SIGSEGV,
             .sa_flags = 0
     };
     return sigaction(SIGSEGV, &action, NULL);
+#else
+    return 0;
+#endif
 }

@@ -36,7 +36,7 @@ struct http_connection_pool {
     struct event_base *base;
 };
 
-typedef void (*http_request_finished_cb)(void *userp);
+typedef void (*http_request_finished_cb)(int fd, void *userp);
 
 struct request_state {
     size_t response_size;

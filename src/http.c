@@ -373,7 +373,9 @@ http_get_complete_cb(struct evhttp_request *req, void *arg) {
         }
         fclose(state->fp);
     }
-    if (state->cb) state->cb(state->userp);
+    struct evbuffer *b = evhttp_request_get_input_buffer(req);
+    evbuffer_write(b, state->out_fd);
+    if (state->cb) state->cb(state->out_fd, state->userp);
     free(arg);
     JDM_LEAVE_FUNCTION;
 }

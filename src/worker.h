@@ -53,11 +53,13 @@ struct worker{
     int cmd[2];
     int id; // Maybe useful for debug purposes
     struct smp_config *cfg;
+    int msg_fd[2];
 
     struct event_base *base;
     struct event *cmd_ev;
 
     size_t job_count;
+    struct hash_table *idle_table;
 
     struct session_pool session_pool;
     struct http_connection_pool http_connection_pool;
@@ -77,13 +79,13 @@ struct worker_hash_table{
 
 extern struct worker_hash_table worker_id_table;
 
-void hash_table_init(struct worker_hash_table *table);
+void worker_hash_table_init(struct worker_hash_table *table);
 
-struct worker_hash_table_element* hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker);
+struct worker_hash_table_element* worker_hash_table_put_if_not_get(struct worker_hash_table *table, const char *key, struct worker *worker);
 
-void hash_table_remove(struct worker_hash_table *table, const char *key);
+void worker_hash_table_remove(struct worker_hash_table *table, const char *key);
 
-void hash_table_clean(struct worker_hash_table *table);
+void worker_hash_table_clean(struct worker_hash_table *table);
 
 struct worker* worker_find_least_busy(struct worker *workers, size_t count);
 

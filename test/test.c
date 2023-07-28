@@ -67,8 +67,8 @@ read_cb(struct bufferevent *bev, void *ptr) {
     }
     if (userp->progress == userp->file_len){
         printf("Done\n");
-        bufferevent_free(bev);
-        event_base_loopexit(userp->base, NULL);
+//        bufferevent_free(bev);
+//        event_base_loopexit(userp->base, NULL);
     }
 }
 
@@ -109,7 +109,7 @@ int main(int argc, char **argv) {
 
     if (argc < 2) return -1;
 
-    timeout.tv_sec = 30;
+    timeout.tv_sec = 90;
     timeout.tv_usec = 0;
 
     srand(clock());

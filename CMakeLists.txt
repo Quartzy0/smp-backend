@@ -10,6 +10,12 @@ find_package(OpenSSL REQUIRED)
 
 file(GLOB smp_backend_SRC CONFIGURE_DEPENDS "src/*.h" "src/*.c")
 
+option(HANDLE_SIGSEGV "Should a signal handler be added to handle a SIGSEGV" ON)
+
+if (HANDLE_SIGSEGV)
+    add_definitions(-DHANDLE_SIGSEGV)
+endif ()
+
 add_executable(smp_backend ${smp_backend_SRC})
 
 target_include_directories(smp_backend PRIVATE libs/librespot-c)
