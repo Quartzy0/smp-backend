@@ -14,30 +14,20 @@
 #include "util.h"
 #include "config.h"
 #include "worker.h"
-#include "hash_table.h"
 
 static struct sp_sysinfo s_sysinfo;
+
+static struct timeval client_timeout;
 
 struct worker_pool{
     struct worker *workers;
     size_t worker_count;
-    struct hash_table *clients_map;
 };
 
 struct worker_callback_container{
     struct worker_pool *pool;
     struct worker *worker;
 };
-
-static int
-clients_fd_hash(void *key){
-    return (int) key;
-}
-
-static bool
-clients_fd_compare(void *key, void *key1){
-    return key == key1;
-}
 
 static void
 client_read_cb(struct bufferevent *bev, void *ctx){
@@ -160,7 +150,7 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
     JDM_ENTER_FUNCTION;
     if (events & BEV_EVENT_ERROR)
         JDM_TRACE("Error from bufferevent: %s", JDM_ERRNO_MESSAGE);
-    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+    if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
         struct worker_callback_container *container = (struct worker_callback_container*) ctx;
         if (container->worker){
             struct worker_request req = {0};
@@ -168,7 +158,6 @@ client_event_cb(struct bufferevent *bev, short events, void *ctx) {
             req.client_fd = bufferevent_getfd(bev);
             worker_send_request(container->worker, &req);
         }
-        hash_table_remove(container->pool->clients_map, (void*) bufferevent_getfd(bev));
         bufferevent_free(bev);
         free(ctx);
         JDM_TRACE("Client disconnected");
@@ -194,8 +183,8 @@ accept_connection_cb(struct evconnlistener *listener, evutil_socket_t fd, struct
     bufferevent_setcb(bev, client_read_cb, NULL, client_event_cb, container);
 
     bufferevent_enable(bev, EV_READ);
+    bufferevent_set_timeouts(bev, &client_timeout, NULL);
 
-    hash_table_put(container->pool->clients_map, (void*) fd, bev);
     JDM_TRACE("Client connected");
     JDM_LEAVE_FUNCTION;
 }
@@ -210,26 +199,6 @@ accept_error_cb(struct evconnlistener *listener, void *ctx) {
 
     event_base_loopexit(base, NULL);
     JDM_LEAVE_FUNCTION;
-}
-
-static void
-worker_msg_cb(int fd, short event, void *param){
-    int idle_fd;
-    size_t bytes_read = read(fd, &idle_fd, sizeof(idle_fd));
-    if(bytes_read != sizeof(idle_fd)) return;
-    struct worker_callback_container *container = (struct worker_callback_container*) param;
-    struct worker_pool *pool = container->pool;
-
-    struct bufferevent *bev = hash_table_remove(pool->clients_map, (void*) idle_fd);
-    if (!bev) return;
-
-    if (container->worker){
-        struct worker_request req = {0};
-        req.type = DISCONNECTED;
-        req.client_fd = idle_fd;
-        worker_send_request(container->worker, &req);
-    }
-    bufferevent_free(bev);
 }
 
 void
@@ -272,6 +241,8 @@ int main(int argc, char **argv) {
         parse_config("config.cfg", &config);
     JDM_INFO("Parsed config:");
     print_config(&config);
+    client_timeout.tv_usec = 0;
+    client_timeout.tv_sec = config.idle_timeout;
 
     // Create needed directories
     mkdir(config.music_info_cache_path, 0777);
@@ -285,7 +256,6 @@ int main(int argc, char **argv) {
     memset(&worker_pool, 0, sizeof(worker_pool));
     worker_pool.worker_count = config.worker_threads;
     worker_pool.workers = calloc(worker_pool.worker_count, sizeof(*worker_pool.workers));
-    hash_table_init(&worker_pool.clients_map, clients_fd_hash, clients_fd_compare, NULL);
     for (int i = 0; i < worker_pool.worker_count; ++i) {
         worker_init(&worker_pool.workers[i]);
         worker_pool.workers[i].id = i;
@@ -302,16 +272,6 @@ int main(int argc, char **argv) {
         JDM_LEAVE_FUNCTION;
         jdm_cleanup_thread();
         return 1;
-    }
-
-    struct event *msg_event[worker_pool.worker_count];
-    struct worker_callback_container container[worker_pool.worker_count];
-    for (int i = 0; i < worker_pool.worker_count; ++i) {
-        pipe(worker_pool.workers[i].msg_fd);
-        container[i].pool = &worker_pool;
-        container[i].worker = &worker_pool.workers[i];
-        msg_event[i] = event_new(base, worker_pool.workers[i].msg_fd[0], EV_READ | EV_PERSIST, worker_msg_cb, &container[i]);
-        event_add(msg_event[i], NULL);
     }
 
     struct event *sigterm_event;
@@ -364,14 +324,11 @@ int main(int argc, char **argv) {
     for (int i = 0; i < worker_pool.worker_count; ++i) {
         struct worker *worker = &worker_pool.workers[i];
         worker_cleanup(worker);
-        event_free(msg_event[i]);
     }
     for (int i = 0; i < worker_pool.worker_count; ++i) {
         struct worker *worker = &worker_pool.workers[i];
         pthread_join(worker->tid, NULL);
     }
-    hash_table_free(worker_pool.clients_map);
-    free(worker_pool.clients_map);
     worker_hash_table_clean(&worker_id_table);
     free(worker_pool.workers);
     event_free(sigterm_event);

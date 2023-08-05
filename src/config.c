@@ -29,7 +29,6 @@ size_t get_mul(char c) {
         default:
             return 1L;
     }
-    return 1L;
 }
 
 size_t parse_num(const char *str) {
@@ -80,6 +79,18 @@ size_t parse_num(const char *str) {
     }                                                                                               \
 }while(0)
 
+#define PARSE_STRING_PROPERTY_ND(config, name) do{                                                  \
+    char *ret, *endl;                                                                               \
+    if((ret = strstr(buf, #name":"))){                                                              \
+        ret += sizeof(#name":")-1;                                                                  \
+        while(isspace(*ret)){ret++;}                                                                \
+        endl = strchr(ret, '\n');                                                                   \
+        (config)->name = malloc(endl-ret + 1);                                                      \
+        memcpy((config)->name, ret, endl-ret);                                                      \
+        (config)->name[endl-ret] = 0;                                                               \
+    }                                                                                               \
+}while(0)
+
 int
 parse_config(const char *file, struct smp_config *config_out) {
     JDM_ENTER_FUNCTION;
@@ -105,11 +116,12 @@ parse_config(const char *file, struct smp_config *config_out) {
         PARSE_NUM_PROPERTY(config_out, album_info_cache_max, -1);
         PARSE_NUM_PROPERTY(config_out, playlist_info_cache_max, -1);
     }
-    PARSE_STRING_PROPERTY(config_out, global_cache_path, NULL, NULL);
+    PARSE_STRING_PROPERTY_ND(config_out, global_cache_path);
     PARSE_STRING_PROPERTY(config_out, music_info_cache_path, config_out->global_cache_path, "music_info/");
     PARSE_STRING_PROPERTY(config_out, music_data_cache_path, config_out->global_cache_path, "music_cache/");
     PARSE_STRING_PROPERTY(config_out, album_info_cache_path, config_out->global_cache_path, "album_info/");
     PARSE_STRING_PROPERTY(config_out, playlist_info_cache_path, config_out->global_cache_path, "playlist_info/");
+    PARSE_NUM_PROPERTY(config_out, idle_timeout, 60);
 
     int cpu_cores = get_cpu_cores();
     PARSE_NUM_PROPERTY(config_out, worker_threads, cpu_cores-1);
@@ -137,6 +149,7 @@ print_config(struct smp_config *config) {
     PRINT_PROPERTY_STRING(config, playlist_info_cache_path);
 
     PRINT_PROPERTY_INT(config, worker_threads);
+    PRINT_PROPERTY_INT(config, idle_timeout);
     JDM_LEAVE_FUNCTION;
 }
 

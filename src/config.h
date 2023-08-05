@@ -21,6 +21,8 @@ struct smp_config{
     char *playlist_info_cache_path;
 
     size_t worker_threads; // In total there will be one more thread than the number of worker threads (the main thread)
+
+    int idle_timeout;
 };
 
 int parse_config(const char *file, struct smp_config *config_out);

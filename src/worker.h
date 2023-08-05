@@ -53,13 +53,11 @@ struct worker{
     int cmd[2];
     int id; // Maybe useful for debug purposes
     struct smp_config *cfg;
-    int msg_fd[2];
 
     struct event_base *base;
     struct event *cmd_ev;
 
     size_t job_count;
-    struct hash_table *idle_table;
 
     struct session_pool session_pool;
     struct http_connection_pool http_connection_pool;

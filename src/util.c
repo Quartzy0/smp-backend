@@ -246,19 +246,28 @@ is_valid_id(uint8_t *id) {
 int error_message_hook(const char *thread_name, uint32_t stack_trace_count, const char *const *stack_trace,
                        jdm_message_level level, uint32_t line, const char *file, const char *function,
                        const char *message, void *param) {
+    char time_str[20];
+    struct tm *sTm;
+
+    time_t now = time(NULL);
+    sTm = gmtime (&now);
+
+    // 2011-09-14 04:52:11
+    strftime (time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", sTm);
+
     switch (level) {
         case JDM_MESSAGE_LEVEL_NONE:
         case JDM_MESSAGE_LEVEL_DEBUG:
         case JDM_MESSAGE_LEVEL_TRACE:
         case JDM_MESSAGE_LEVEL_INFO:
         case JDM_MESSAGE_LEVEL_WARN: {
-            printf("%s [%s] %s:%d %s: %s\n", jdm_message_level_str(level), thread_name, file, line, function, message);
+            printf("%s %s [%s] %s:%d %s: %s\n", time_str, jdm_message_level_str(level), thread_name, file, line, function, message);
             break;
         }
         case JDM_MESSAGE_LEVEL_ERR:
         case JDM_MESSAGE_LEVEL_CRIT:
         case JDM_MESSAGE_LEVEL_FATAL: {
-            fprintf(stderr, "%s [%s] %s:%d %s: %s\n", jdm_message_level_str(level), thread_name, file, line, function, message);
+            fprintf(stderr, "%s %s [%s] %s:%d %s: %s\n", time_str, jdm_message_level_str(level), thread_name, file, line, function, message);
             for (size_t j = stack_trace_count - 1; j > 0; --j) {
                 fprintf(stderr, "\t^- %s\n", stack_trace[j]);
             }
