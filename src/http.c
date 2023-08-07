@@ -278,7 +278,7 @@ http_get_no_cache_cb(struct evhttp_request *req, void *arg) {
         char *end = NULL;
         state->response_size = strtoll(clens, &end, 10);
         JDM_TRACE("Send expected response size: %zu", state->response_size);
-        enum error_type no_err = ET_NO_ERROR;
+        static const enum error_type no_err = ET_NO_ERROR;
         write(state->out_fd, &no_err, 1);
         write(state->out_fd, &state->response_size, sizeof(state->response_size));
     }
@@ -306,7 +306,7 @@ http_get_cb(struct evhttp_request *req, void *arg) {
         JDM_TRACE("Send expected response size: %zu", state->response_size);
 
         offset = sizeof(state->response_size) + 1;
-        enum error_type no_err = ET_NO_ERROR;
+        static const enum error_type no_err = ET_NO_ERROR;
         memcpy(&wj->tmp[wj->current_buf][wj->offset], &no_err, 1);
         memcpy(&wj->tmp[wj->current_buf][wj->offset+1], &state->response_size, sizeof(state->response_size));
     }

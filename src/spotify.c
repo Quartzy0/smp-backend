@@ -203,7 +203,7 @@ finish_seek_cb(int ret, void *userp) {
         element->write_job.cb.aio_fildes = fileno(element->cache_fp);
     }
     if (!element->progress){
-        enum error_type no_err = ET_NO_ERROR;
+        static const enum error_type no_err = ET_NO_ERROR;
         for (int i = 0; i < element->fd_vec.len; ++i) {
             if (element->fd_vec.el[i] == -1) continue;
             write(element->fd_vec.el[i], &no_err, 1);

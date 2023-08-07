@@ -5,6 +5,7 @@
 #include "worker.h"
 
 #include <unistd.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <event2/event.h>
 #include <sys/sendfile.h>
@@ -18,12 +19,30 @@
 struct worker_hash_table worker_id_table;
 char region_url_insertion[] = "?market=";
 
+struct music_data_write_data{
+    struct worker *worker;
+    struct worker_request req;
+    size_t file_len;
+    size_t actual_len;
+    size_t bytes_read;
+    char *path;
+    FILE *fp;
+};
+
+static void
+http_cache_file_sent(struct bufferevent *bev, void *param){
+    struct music_data_write_data *data = (struct music_data_write_data*) param;
+    fclose(data->fp);
+    bufferevent_free(bev);
+    memset(data, 0, sizeof(*data));
+}
+
 void
 http_generic_request(const char *id, int fd, struct http_connection_pool *http_connection_pool, const char *uri_in,
                      const char *path_in, bool api, bool insert_id_url, struct worker *worker,
                      http_request_finished_cb cb, void *userp) {
     JDM_ENTER_FUNCTION;
-    char *uri;
+    char *uri = NULL;
     if (insert_id_url) {
         size_t uri_in_len = strlen(uri_in);
         uri = calloc(22 + uri_in_len + sizeof(region_url_insertion) + 2, sizeof(*uri));
@@ -35,21 +54,42 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
     }
 
     size_t path_in_len = strlen(path_in);
-    char *path = calloc(22 + path_in_len + 1, sizeof(*path));
+    char path[path_in_len + 23];
     memcpy(path, path_in, path_in_len);
     memcpy(&path[path_in_len], id, 22);
+    path[sizeof(path)-1] = 0;
 
     if (!access(path, R_OK)) {
         FILE *fp = fopen(path, "r");
-        size_t read_size = 0;
-        fread(&read_size, sizeof(read_size), 1, fp);
+        if (!fp) goto read_fail;
+        size_t read_size;
+        char tmp_data[sizeof(read_size) + 1];
+        if(fread(tmp_data, 1, sizeof(tmp_data), fp) != sizeof(tmp_data)) goto read_fail;
+        read_size = *((size_t*) &tmp_data[1]);
 
-        fseek(fp, 0L, SEEK_END);
-        int64_t len = ftell(fp);
-        rewind(fp);
+        if (tmp_data[0] != ET_NO_ERROR){
+            goto read_fail;
+        }
 
-        if (len - sizeof(read_size) == read_size) {
-            sendfile(fd, fileno(fp), NULL, len);
+        struct stat statbuf;
+        if (stat(path, &statbuf)){
+            JDM_ERROR("Error when calling stat for path '%s': %s", path, JDM_ERRNO_MESSAGE);
+            goto read_fail;
+        }
+
+        if (statbuf.st_size - sizeof(tmp_data) == read_size) {
+            struct music_data_write_data *data = malloc(sizeof(*data));
+            data->fp = fp;
+
+            struct bufferevent *bev = bufferevent_socket_new(worker->base, fd, 0);
+            bufferevent_enable(bev, EV_WRITE);
+            bufferevent_setcb(bev, NULL, http_cache_file_sent, NULL, data);
+            evbuffer_add_file(bufferevent_get_output(bev), fileno(fp), 0, -1);
+            bufferevent_flush(bev, EV_WRITE, BEV_FINISHED);
+
+            free(uri);
+            JDM_LEAVE_FUNCTION;
+            return;
         } else {
             if (api) {
                 http_dispatch_request_api(http_connection_pool, insert_id_url ? uri : uri_in, fd,
@@ -62,8 +102,13 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
         }   // Since the API requests are very small in comparison to downloading songs, an
             // extra request isn't a big deal.
         fclose(fp);
+        free(uri);
         JDM_LEAVE_FUNCTION;
         return;
+
+        read_fail:
+        if (fp) fclose(fp);
+        remove(path);
     }
     FILE *fp = fopen(path, "a");
 
@@ -72,6 +117,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
     } else {
         http_dispatch_request_partner(http_connection_pool, insert_id_url ? uri : uri_in, fd, fp, cb, userp);
     }
+    free(uri);
     JDM_LEAVE_FUNCTION;
 }
 
@@ -88,17 +134,6 @@ http_request_finished(int fd, void *arg){
     struct worker *worker = (struct worker*) arg;
     worker->job_count--;
 }
-
-struct music_data_write_data{
-    struct worker *worker;
-    struct worker_request req;
-    size_t file_len;
-    size_t progress;
-    size_t actual_len;
-    size_t bytes_read;
-    char *path;
-    FILE *fp;
-};
 
 static void
 file_written_cb(struct bufferevent *bev, void *param){
@@ -118,13 +153,13 @@ file_written_cb(struct bufferevent *bev, void *param){
             JDM_TRACE("Sending data for '%.22s' from cache while reading", data->req.regioned_id.id);
             free(data->path);
         } else {
-            data->progress = data->actual_len - data->bytes_read;
-            spotify_activate_session(&data->worker->session_pool, data->progress, data->req.regioned_id.id, data->path, data->req.client_fd,
+            spotify_activate_session(&data->worker->session_pool, data->actual_len - data->bytes_read, data->req.regioned_id.id, data->path, data->req.client_fd,
                                      data->req.regioned_id.region[0] ? data->req.regioned_id.region : NULL, element_finished_cb,
                                      data->worker, data->worker->base, data->file_len);
         }
     } else {
         JDM_TRACE("Sending data for '%.22s' from cache", data->req.regioned_id.id);
+        data->worker->job_count--;
         free(data->path);
     }
 
@@ -150,17 +185,24 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             path[music_cache_len+22] = 0;
             worker->job_count++;
 
-            size_t progress = 0, file_len = 0;
+            size_t file_len = 0;
             if (!access(path, R_OK)) {
                 FILE *fp = fopen(path, "r");
+                if(!fp) goto read_error;
                 char tmp_data[1 + sizeof(file_len)];
-                fread(tmp_data, sizeof(tmp_data), 1, fp);
+                size_t bytes_read;
+                if((bytes_read = fread(tmp_data, 1, sizeof(tmp_data), fp)) != sizeof(tmp_data)) goto read_error;
                 file_len = *((size_t *) &tmp_data[1]); // Skip first byte
-                fseek(fp, 0L, SEEK_END);
-                size_t actual_len = ftell(fp);
-                rewind(fp);
+
+                struct stat statbuf;
+                if (stat(path, &statbuf)){
+                    JDM_ERROR("Error when calling stat for path '%s': %s", path, JDM_ERRNO_MESSAGE);
+                    goto read_error;
+                }
 
                 if (tmp_data[0] != ET_NO_ERROR){
+                    read_error:
+                    file_len = 0;
                     fclose(fp); // File contains an error response (somehow)
                     remove(path);
                 } else{
@@ -168,9 +210,8 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
                     data->worker = worker;
                     data->req = req;
                     data->file_len = file_len;
-                    data->progress = progress;
-                    data->actual_len = actual_len;
-                    data->bytes_read = sizeof(tmp_data);
+                    data->actual_len = statbuf.st_size;
+                    data->bytes_read = bytes_read;
                     data->fp = fp;
                     data->path = path;
                     int fd = fileno(fp);
@@ -185,7 +226,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             }
             JDM_TRACE("Sending data for '%.22s'", req.regioned_id.id);
 
-            spotify_activate_session(&worker->session_pool, progress, req.regioned_id.id, path, req.client_fd,
+            spotify_activate_session(&worker->session_pool, 0, req.regioned_id.id, path, req.client_fd,
                                      req.regioned_id.region[0] ? req.regioned_id.region : NULL, element_finished_cb,
                                      worker, worker->base, file_len);
             break;
