@@ -34,6 +34,7 @@ http_cache_file_sent(struct bufferevent *bev, void *param){
     struct music_data_write_data *data = (struct music_data_write_data*) param;
     fclose(data->fp);
     bufferevent_free(bev);
+    data->worker->job_count--;
     memset(data, 0, sizeof(*data));
 }
 
@@ -42,6 +43,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
                      const char *path_in, bool api, bool insert_id_url, struct worker *worker,
                      http_request_finished_cb cb, void *userp) {
     JDM_ENTER_FUNCTION;
+    worker->job_count++;
     char *uri = NULL;
     if (insert_id_url) {
         size_t uri_in_len = strlen(uri_in);
@@ -80,6 +82,7 @@ http_generic_request(const char *id, int fd, struct http_connection_pool *http_c
         if (statbuf.st_size - sizeof(tmp_data) == read_size) {
             struct music_data_write_data *data = malloc(sizeof(*data));
             data->fp = fp;
+            data->worker = worker;
 
             struct bufferevent *bev = bufferevent_socket_new(worker->base, fd, 0);
             bufferevent_enable(bev, EV_WRITE);
@@ -253,6 +256,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case SEARCH: {
+            worker->job_count++;
             int flags = req.search_query.flags;
             size_t uri_len = 19 + (flags & 1) * 6 + (flags & 2) * 7 + (flags & 4) * 6 + (flags & 8) * 9 + strlen(req.search_query.generic_query) + 1;
             char *uri = calloc(uri_len, sizeof(*uri));
@@ -283,6 +287,7 @@ cmd_read_cb(int wrk_fd, short what, void *arg) {
             break;
         }
         case RECOMMENDATIONS: {
+            worker->job_count++;
             uint8_t t = req.recommendation_seed.t, a = req.recommendation_seed.a;
             size_t uri_len = (t != 0) * (13 + t * 22 + (t - 1)) +
                              (a != 0) * (14 + a * 22 + (a - 1)) +
@@ -459,11 +464,15 @@ worker_hash_table_put_if_not_get(struct worker_hash_table *table, const char *ke
 
     pthread_mutex_lock(&table->mutex);
     struct worker_hash_table_bucket *bucket = &table->buckets[bucket_index];
-    for (int i = 0; i < bucket->len; ++i) {
-        if (bucket->elements && !memcmp(bucket->elements[i].key, key, 22)) {
-            pthread_mutex_unlock(&table->mutex);
-            JDM_LEAVE_FUNCTION;
-            return &bucket->elements[i];
+    if (bucket->elements){
+        for (int i = 0; i < bucket->len; ++i) {
+            if (!memcmp(bucket->elements[i].key, key, 22)) {
+                if (!bucket->elements[i].worker) bucket->elements[i].worker = worker;
+
+                pthread_mutex_unlock(&table->mutex);
+                JDM_LEAVE_FUNCTION;
+                return &bucket->elements[i];
+            }
         }
     }
 
@@ -476,12 +485,12 @@ worker_hash_table_put_if_not_get(struct worker_hash_table *table, const char *ke
         if (!tmp) perror("error while calling realloc()");
         bucket->elements = tmp;
     }
-    memcpy(bucket->elements[bucket->len].key, key, sizeof(bucket->elements[bucket->len].key));
-    bucket->elements[bucket->len].worker = worker;
-    bucket->len++;
+    struct worker_hash_table_element *element = &bucket->elements[bucket->len++];
+    memcpy(element->key, key, sizeof(element->key));
+    element->worker = worker;
     pthread_mutex_unlock(&table->mutex);
     JDM_LEAVE_FUNCTION;
-    return &bucket->elements[bucket->len-1];
+    return element;
 }
 
 void
