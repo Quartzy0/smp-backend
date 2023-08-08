@@ -200,8 +200,8 @@ session_error(struct sp_session *session, enum sp_error err) {
             ERROR_ENTRY(SP_ERR_TIMEOUT),
             ERROR_ENTRY(SP_ERR_TRACK_NOT_FOUND),
     };
-    JDM_WARN("Session error: %s - %s (%d) (occurred before msg %d, queue %d)", err_c[err + 10], sp_errmsg, err,
-                 session->msg_type_next, session->msg_type_queued);
+    JDM_WARN("Session error: %s - %s (%d) (occurred before msg %d, queue %d) (connected to '%s:%d')", err_c[err + 10], sp_errmsg, err,
+                 session->msg_type_next, session->msg_type_queued, session->conn.ap_address, session->conn.ap_port);
 
     session_return(session, err);
 
