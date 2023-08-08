@@ -90,6 +90,9 @@ clean_element(struct element *element) {
         librespotc_logout(element->session);
         element->session = NULL;
     }
+    if (element->creds){
+        element->creds->uses--;
+    }
     fd_vec_free(&element->fd_vec);
     if (element->read_ev) event_free(element->read_ev);
     if (element->cache_fp) fclose(element->cache_fp);
@@ -240,6 +243,8 @@ spotify_file_open_cb(int fd, void *userp) {
         if (element->cache_fp) fclose(element->cache_fp);
         element->cache_fp = NULL;
         remove(element->path);
+        element->cb(element, element->cb_arg);
+        clean_element(element);
         JDM_LEAVE_FUNCTION;
         return;
     }
@@ -267,7 +272,10 @@ session_cb(int ret, void *userp) {
             write_error_spotify(element->fd_vec.el[i]);
         }
         fclose(element->cache_fp);
+        element->cache_fp = NULL;
         remove(element->path);
+        element->cb(element, element->cb_arg);
+        clean_element(element);
         JDM_LEAVE_FUNCTION;
         return;
     }
@@ -284,6 +292,15 @@ session_cb(int ret, void *userp) {
     int r = librespotc_open(element->id, element->session, spotify_file_open_cb, userp);
     if (r) {
         JDM_ERROR("Error when calling librespotc_open: %s", librespotc_last_errmsg());
+
+        for (int i = 0; i < element->fd_vec.len; ++i) {
+            write_error_spotify(element->fd_vec.el[i]);
+        }
+        fclose(element->cache_fp);
+        element->cache_fp = NULL;
+        remove(element->path);
+        element->cb(element, element->cb_arg);
+        clean_element(element);
     }
     JDM_LEAVE_FUNCTION;
 }
@@ -316,6 +333,12 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
 
     if (uninit != -1) {
         struct credentials *creds = get_credentials();
+        if (!creds){
+            JDM_WARN("All credentials at maximum capacity! Consider adding more accounts.");
+            write_error(fd, ET_FULL, "This instance is at max capacity");
+            cb(NULL, cb_arg);
+            return NULL;
+        }
         JDM_TRACE("Creating new session as %s", creds->creds.username);
         pool->elements[uninit].progress = progress;
         pool->elements[uninit].file_len = file_len;
@@ -334,18 +357,22 @@ spotify_activate_session(struct session_pool *pool, size_t progress, char *id, c
         }
         memcpy(pool->elements[uninit].id, id, sizeof(pool->elements[uninit].id));
         pool->elements[uninit].creds = creds;
+        int ret;
         if (creds->creds.stored_cred_len == 0) {
-            librespotc_login_password(creds->creds.username,
+            ret = librespotc_login_password(creds->creds.username,
                                       creds->creds.password, &pool->elements[uninit].session, session_cb,
                                       &pool->elements[uninit], pool->elements[uninit].base);
         } else {
-            librespotc_login_stored_cred(creds->creds.username,
+            ret = librespotc_login_stored_cred(creds->creds.username,
                                          creds->creds.stored_cred,
                                          creds->creds.stored_cred_len, &pool->elements[uninit].session, session_cb,
                                          &pool->elements[uninit], pool->elements[uninit].base);
         }
-        if (!pool->elements[uninit].session){
+        if (ret || !pool->elements[uninit].session){
+            cb(&pool->elements[uninit], cb_arg);
             JDM_ERROR("Error when creating session: %s", librespotc_last_errmsg());
+            write_error_spotify(fd);
+            clean_element(&pool->elements[uninit]);
             JDM_LEAVE_FUNCTION;
             return NULL;
         }
@@ -432,7 +459,13 @@ audio_read_cb(int fd, short what, void *arg) {
         }
         if (element->cb) element->cb(element, element->cb_arg);
 
-        clean_element(element);
+        if (element->cache_fp) fclose(element->cache_fp);
+        free(element->path);
+        element->cache_fp = NULL;
+        element->path = NULL;
+        memset(element->fd_vec.el, 0, element->fd_vec.len * sizeof(*element->fd_vec.el));
+        element->fd_vec.len = 0;
+
         element->active = false;
         element->progress = 0;
     }

@@ -128,7 +128,7 @@ void
 element_finished_cb(struct element *element, void *arg){
     struct worker *worker = (struct worker*) arg;
 
-    worker_hash_table_remove(&worker_id_table, element->id);
+    if(element) worker_hash_table_remove(&worker_id_table, element->id);
     worker->job_count--;
 }
 

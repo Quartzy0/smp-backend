@@ -425,10 +425,13 @@ request_make(enum sp_msg_type type, struct sp_session *session) {
 
     // Make sure the connection is in a state suitable for sending this message
     ret = ap_connect(&session->conn, type, &session->cooldown_ts, session->ap_avoid, &cb, session);
-    if (ret == SP_OK_WAIT)
-        return relogin(type, session); // Can't proceed right now, the handshake needs to complete first
-    else if (ret < 0)
+    if (ret == SP_OK_WAIT) {
+        ret = relogin(type, session);
+        JDM_LEAVE_FUNCTION;
+        return ret; // Can't proceed right now, the handshake needs to complete first
+    } else if (ret < 0) {
         RETURN_ERROR(ret, sp_errmsg);
+    }
 
     ret = msg_make(&msg, type, session);
     if (ret < 0)
